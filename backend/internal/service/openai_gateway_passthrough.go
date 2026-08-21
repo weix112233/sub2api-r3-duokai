@@ -81,16 +81,20 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 		reqStream = gjson.GetBytes(body, "stream").Bool()
 
+		stageCodexFingerprintIDs(c, nil)
 		// 指纹收敛：与非透传路径同门控（仅 OAuth、legacy compact 形态跳过）。
 		// 一次性解析收敛 ID：请求体 client_metadata 在此改写（raw 字节外科
 		// 手术，透传热路径禁全量 Unmarshal），出站头改写由请求构造器读取
 		// context 中的同一份 IDs 完成（turn_id 等随机字段两侧必须一致）。
-		if !isOpenAIResponsesCompactPath(c) {
+		// machine 模式下 compact 也 resolve/stage（与非透传路径同门控，见 openai_gateway_forward.go）。
+		if !isOpenAIResponsesCompactPath(c) || account.GetCodexFingerprintMode() == codexFingerprintMachine {
 			var clientHeaders http.Header
 			if c != nil && c.Request != nil {
 				clientHeaders = c.Request.Header
 			}
 			fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+			// machine：按本链路终态出站 UA（与 buildUpstreamRequestOpenAIPassthrough 的 enforceCodexIdentityHeadersWithUA 同源）补记 sandbox 标签。
+			stampCodexMachineSandboxTag(fpIDs, s.codexIdentityOverrideUA(account))
 			if fpIDs != nil {
 				fpBody, fpChanged, fpErr := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
 				if fpErr != nil {
@@ -390,16 +394,25 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		clientPromptCacheKey = explicitOpenAIRequestSessionID(c, body)
 	}
 	compatMessagesBridge := isOpenAICompatMessagesBridgeContext(c) || isOpenAICompatMessagesBridgeBody(body)
-	sanitizedBody, _, sanitizeErr := sanitizeCodexOutboundJSON(body)
+	outboundPromptCacheKey := ""
+	stagedIDs := stagedCodexFingerprintIDsForAccount(c, account)
+	machineStaged := stagedIDs != nil && stagedIDs.mode == codexFingerprintMachine
+	sanitizedBody, _, sanitizeErr := sanitizeCodexOutboundJSONWithFingerprint(body, stagedIDs)
 	if sanitizeErr != nil {
 		return nil, sanitizeErr
 	}
 	body = sanitizedBody
-	if account != nil && account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) {
+	if machineStaged {
+		// machine 的 body sink 已把 prompt_cache_key 做 1:1 假名化（网关产物，
+		// 上面的 sanitizer 已保留）；pcv2 网关键改写会破坏「同一会话同一假名」
+		// 的 machine 语义，跳过改写只登记出站值。
+		outboundPromptCacheKey = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+		setOpenAIOutboundPromptCacheKey(c, outboundPromptCacheKey)
+	} else if account != nil && account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) {
 		mappedModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 		fallbackKey := deriveOpenAIOutboundPromptCacheKeyFallback(clientPromptCacheKey, mappedModel)
 		rewritePromptCacheKey := rewriteOpenAIOutboundPromptCacheKeyWithFallback
-		if shouldBindOpenAIUpstreamSessionAffinity(account) && !compatMessagesBridge {
+		if account.Type == AccountTypeOAuth && !account.IsOpenAIAgentIdentity() {
 			rewritePromptCacheKey = rewriteOpenAIOutboundPromptCacheKeyWithSessionFallback
 		}
 		rewrittenBody, rewrittenKey, rewriteErr := rewritePromptCacheKey(body, mappedModel, fallbackKey)
@@ -407,20 +420,79 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 			return nil, rewriteErr
 		}
 		body = rewrittenBody
+		outboundPromptCacheKey = rewrittenKey
 		setOpenAIOutboundPromptCacheKey(c, rewrittenKey)
+	}
+	var sessionAffinity *openAIGatewaySessionAffinity
+	if shouldUseOpenAIGatewaySessionAffinity(account) {
+		// r3 透传源头语义：session/conversation 各自按客户端显式下划线头
+		// （缺失时回退 cache key）独立隔离；仅发送本地隔离值，原始标识由
+		// 终态 sanitizer 删除。conversation 的自动兜底仅限非 messages 桥。
+		clientSessionSeed := ""
+		clientConversationSeed := ""
+		if c != nil && c.Request != nil {
+			clientSessionSeed = strings.TrimSpace(c.Request.Header.Get("session_id"))
+			clientConversationSeed = strings.TrimSpace(c.Request.Header.Get("conversation_id"))
+		}
+		if machineStaged {
+			// machine：非透传锚出站 pck'（假名，本链路 clientPromptCacheKey 读自
+			// sink 改写后的 body 即 pck' 本身）；客户端带下划线 session_id（第三方
+			// Agent 形态）时优先锚定该本地会话标识。messages 桥不带 body pck 时
+			// 回退客户端 cache key。conversation 不做 machine 假名锚——客户端没发
+			// 就不补（machine 只改不增）。
+			affinitySeed := strings.TrimSpace(outboundPromptCacheKey)
+			if affinitySeed == "" && compatMessagesBridge {
+				affinitySeed = strings.TrimSpace(clientPromptCacheKey)
+			}
+			if clientSessionSeed != "" {
+				affinitySeed = clientSessionSeed
+			}
+			sessionAffinity = deriveOpenAIGatewaySessionAffinity(
+				getAPIKeyIDFromContext(c),
+				affinitySeed,
+				false,
+			)
+			if clientConversationSeed != "" {
+				sessionAffinity = deriveOpenAIGatewaySessionAffinityWithIndependentSeeds(
+					getAPIKeyIDFromContext(c),
+					affinitySeed,
+					clientConversationSeed,
+				)
+			}
+		} else {
+			sessionSeed := clientSessionSeed
+			if sessionSeed == "" {
+				sessionSeed = strings.TrimSpace(clientPromptCacheKey)
+			}
+			if sessionSeed == "" && isOpenAIResponsesCompactPath(c) {
+				// r3 语义：compact 路径无 cache key 时以 compact 会话解析结果为锚。
+				sessionSeed = strings.TrimSpace(resolveOpenAICompactSessionID(c))
+			}
+			conversationSeed := clientConversationSeed
+			if conversationSeed == "" && !compatMessagesBridge {
+				conversationSeed = strings.TrimSpace(clientPromptCacheKey)
+			}
+			sessionAffinity = deriveOpenAIGatewaySessionAffinityWithIndependentSeeds(
+				getAPIKeyIDFromContext(c),
+				sessionSeed,
+				conversationSeed,
+			)
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req = req.WithContext(withOpenAIGatewaySessionAffinity(req.Context(), sessionAffinity))
 
-	// 透传客户端请求头（安全白名单）。
+	// 透传客户端请求头（安全白名单；Codex 会话身份头仅 machine 模式放行）。
 	allowTimeoutHeaders := s.isOpenAIPassthroughTimeoutHeadersAllowed()
+	codexMachine := activeCodexFingerprintMode(account) == codexFingerprintMachine
 	if c != nil && c.Request != nil {
 		for key, values := range c.Request.Header {
 			lower := strings.ToLower(strings.TrimSpace(key))
-			if !isOpenAIPassthroughAllowedRequestHeader(lower, allowTimeoutHeaders) {
+			if !isOpenAIPassthroughAllowedRequestHeader(lower, allowTimeoutHeaders, codexMachine) {
 				continue
 			}
 			for _, v := range values {
@@ -448,8 +520,6 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	}
 
 	// OAuth 透传到 ChatGPT internal API 时补齐必要头。
-	upstreamSessionID := ""
-	upstreamConversationID := ""
 	if account.Type == AccountTypeOAuth {
 		// Current Codex OAuth HTTP no longer negotiates the legacy Responses
 		// experiment. Passthrough may receive it from an older client, so remove
@@ -459,43 +529,23 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
 			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
 		}
-		apiKeyID := getAPIKeyIDFromContext(c)
-		// Compatibility traffic still needs stable isolated session affinity for
-		// prompt caching. Only the automatic conversation fallback is disabled;
-		// an explicitly supplied conversation remains isolated and preserved.
-		bindSessionAffinity := shouldBindOpenAIUpstreamSessionAffinity(account)
-		// 先保存客户端原始值，再做 compact 补充，避免后续统一隔离时读到已处理的值。
-		clientSessionID := strings.TrimSpace(req.Header.Get("session_id"))
-		clientConversationID := strings.TrimSpace(req.Header.Get("conversation_id"))
+		// Do not reintroduce client session/conversation identifiers after the
+		// final header sanitizer. Session affinity headers are gateway-owned
+		// values derived from the local conversation anchor (see
+		// deriveOpenAIGatewaySessionAffinity above) and are applied just before
+		// the fingerprint header sink.
+		req.Header.Del("session_id")
+		req.Header.Del("conversation_id")
 		if isOpenAIResponsesCompactPath(c) {
 			req.Header.Set("accept", "application/json")
 			if req.Header.Get("version") == "" {
 				req.Header.Set("version", codexCLIVersion)
-			}
-			if clientSessionID == "" {
-				clientSessionID = resolveOpenAICompactSessionID(c)
 			}
 		} else if req.Header.Get("accept") == "" {
 			req.Header.Set("accept", "text/event-stream")
 		}
 		if req.Header.Get("originator") == "" {
 			req.Header.Set("originator", openai.CodexDefaultOriginator)
-		}
-		// 使用客户端显式会话头；缺失时回退到真实 prompt cache affinity。
-		// 仅发送本地隔离后的值，原始标识仍由终态 sanitizer 删除。
-		if bindSessionAffinity && clientSessionID == "" {
-			clientSessionID = clientPromptCacheKey
-		}
-		if bindSessionAffinity && !compatMessagesBridge && clientConversationID == "" {
-			clientConversationID = clientPromptCacheKey
-		}
-		if bindSessionAffinity && clientSessionID != "" {
-			upstreamSessionID = isolateOpenAISessionID(apiKeyID, clientSessionID)
-			req.Header.Set("session_id", upstreamSessionID)
-		}
-		if bindSessionAffinity && clientConversationID != "" {
-			upstreamConversationID = isolateOpenAISessionID(apiKeyID, clientConversationID)
-			req.Header.Set("conversation_id", upstreamConversationID)
 		}
 	} else if isOpenAIResponsesCompactPath(c) {
 		// 透传白名单会放行客户端的 Accept: text/event-stream；compact 上游是
@@ -512,10 +562,6 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 		req.Header.Set("user-agent", codexCLIUserAgent)
 	}
-	// 指纹收敛：使用 forwardOpenAIPassthrough 中预计算的收敛 ID 改写出站头，
-	// 与请求体 client_metadata 共享同一份 IDs（与非透传路径相同的相对位置：
-	// 会话隔离之后、终态身份收口之前）。
-	applyStagedCodexFingerprintHeaders(c, account, req.Header)
 	// 终态收口：透传路径的 OAuth 与非透传完全一致，同样强制统一出站身份
 	// （User-Agent / originator / version 同源自洽），客户端自报身份不会到达上游。
 	if account.Type == AccountTypeOAuth {
@@ -532,9 +578,12 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 保证不被覆盖丢失）。
 	applyOpenAICodexBetaFeatures(c, account, req.Header)
 	setOpenAICodexRoutingHintFromBody(req.Header, account, body)
+	// 会话亲和头（网关自有隔离值）先落，再交给指纹头 sink——machine 分支会按
+	//「只改不增」删除 Codex 形态下游的下划线会话头（第三方形态保留）。
+	applyOpenAIGatewaySessionAffinityHeaders(req.Header, sessionAffinity)
+	applyStagedCodexFingerprintHeaders(c, account, req.Header)
 	s.guardOpenAICodexTurnStateEcho(c, account, req.Header)
-	req = WithOpenAIUpstreamSessionAffinity(req, upstreamSessionID, upstreamConversationID)
-	sanitizeCodexOutboundRequest(req)
+	sanitizeCodexOutboundRequestWithFingerprint(req, stagedCodexFingerprintIDsForAccount(c, account))
 	logOpenAIRoutingDiagnosticsFromBody(ctx, account, "http_passthrough", req.Header, body, "not_applicable")
 
 	return req, nil
@@ -794,14 +843,17 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 	return fmt.Errorf("upstream error: %d (client response sanitized)", resp.StatusCode)
 }
 
-func isOpenAIPassthroughAllowedRequestHeader(lowerKey string, allowTimeoutHeaders bool) bool {
+// isOpenAIPassthroughAllowedRequestHeader 透传 /responses 链路的客户端头放行判定；
+// codexMachine 为账号有效指纹模式是否为 machine（activeCodexFingerprintMode）。
+func isOpenAIPassthroughAllowedRequestHeader(lowerKey string, allowTimeoutHeaders bool, codexMachine bool) bool {
 	if lowerKey == "" {
 		return false
 	}
 	if isOpenAIPassthroughTimeoutHeader(lowerKey) {
 		return allowTimeoutHeaders
 	}
-	return openaiPassthroughAllowedHeaders[lowerKey]
+	// Codex 会话身份头仅在 machine 模式的 /responses 透传链路放行（images 链路直接查 openaiPassthroughAllowedHeaders，不经此处）。
+	return openaiPassthroughAllowedHeaders[lowerKey] || (codexMachine && openaiCodexSessionIdentityHeaders[lowerKey])
 }
 
 func isOpenAIPassthroughTimeoutHeader(lowerKey string) bool {

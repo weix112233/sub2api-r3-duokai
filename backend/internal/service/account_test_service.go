@@ -2035,7 +2035,8 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	if isOAuth {
 		testModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
-	payloadBytes, _ := json.Marshal(createOpenAICompactProbePayload(testModelID, isOAuth))
+	payload := createOpenAICompactProbePayload(testModelID, isOAuth)
+	payloadBytes, _ := json.Marshal(payload)
 	if !agentIdentityTaskRecoveryWasTried(ctx) {
 		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	}
@@ -2065,13 +2066,42 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	}
 	applyOpenAICodexProbeHeaders(req.Header)
 
+	// compact 探针的暂存指纹 IDs：terminal sanitizer 需要同一份 IDs 才能把
+	// machine 假名识别为网关产物予以保留（而非当客户端标识符剥离）。
+	var probeStagedIDs *codexFingerprintIDs
 	if isOAuth {
 		req.Host = "chatgpt.com"
 		setOpenAIChatGPTAccountHeaders(req.Header, credentialAccount)
 		// 指纹收敛：探测与真实转发走同一个 /responses 端点，身份也必须同构，
 		// 否则探测流量会以「缺 x-codex-installation-id + 非收敛 session」的
-		// 形态暴露在上游眼里。账号关闭收敛（off）时返回 nil，探测保持原样。
+		// 形态暴露在上游眼里。账号关闭收敛（off 或无 seed）时返回 nil，探测保持原样。
 		if fpIDs := resolveCodexFingerprintIDsFromRequest(account, req.Header); fpIDs != nil {
+			probeStagedIDs = fpIDs
+			// machine：sandbox 标签与探测出站 UA（账号级自定义 UA，缺省走
+			// ensureCodexIdentityHeaders 的规范 CLI 身份）同源判定 OS 段。
+			stampCodexMachineSandboxTag(fpIDs, credentialAccount.GetOpenAIUserAgent())
+			if fpIDs.mode == codexFingerprintMachine {
+				// machine sink 只改不增且会删除下划线 Session_ID / Conversation_ID，探测必须先
+				// 构造真实请求的身份形态再交给 sink 假名化。真实 Codex 的常规请求线：连字符
+				// session-id / thread-id、x-client-request-id = thread（codex-api/src/endpoint/responses.rs:87-93）、
+				// window "{thread}:{n}"；顶层 x-codex-installation-id 仅 compact 分支发送
+				// （core/src/client.rs:613；常规头见 client.rs:1186-1211）。
+				probeSessionID := compactProbeSessionID(account.ID)
+				req.Header.Set("session-id", probeSessionID)
+				req.Header.Set("thread-id", probeSessionID)
+				req.Header.Set("x-client-request-id", probeSessionID)
+				req.Header.Set("X-Codex-Window-ID", probeSessionID+":0")
+				// body 同样补成真实 compaction 形态（prompt_cache_key + client_metadata + 内嵌 turn
+				// metadata），头侧 x-codex-turn-metadata 与之同源（responses_metadata.rs compatibility_headers）；
+				// 头/体走同一份 fpIDs 的 machine sink，顺序与 Forward 一致：先 body sink 再头 sink。
+				turnMetadataJSON := applyCodexMachineCompactProbeIdentity(payload, probeSessionID, fpIDs.sandboxTag, time.Now())
+				req.Header.Set("x-codex-turn-metadata", turnMetadataJSON)
+				applyCodexFingerprintClientMetadata(payload, fpIDs)
+				payloadBytes, _ = json.Marshal(payload)
+				req.Body = io.NopCloser(bytes.NewReader(payloadBytes))
+				req.ContentLength = int64(len(payloadBytes))
+				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(payloadBytes)), nil }
+			}
 			applyCodexFingerprintHeaders(req.Header, fpIDs)
 		}
 	}
@@ -2080,7 +2110,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	account.ApplyHeaderOverrides(req.Header)
 	// Compact probe 复用真实 /responses 出站边界。账号级覆写和探测兼容
 	// 逻辑都可能重新写入关联标识，因此必须在最终 DoWithTLS 前再清洗一次。
-	sanitizeCodexOutboundHeaders(req.Header)
+	sanitizeCodexOutboundHeadersWithFingerprint(req.Header, probeStagedIDs)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

@@ -220,6 +220,15 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		}
 	}
 
+	// machine 指纹：桥不经过 Forward，仅 machine 模式在此 stage（体 sink 在此、头 sink 在 buildUpstreamRequest）。
+	if account.Type == AccountTypeOAuth {
+		stagedBody, stageErr := s.stageCodexMachineFingerprintIDsForCompatBridge(c, account, responsesBody)
+		if stageErr != nil {
+			return nil, fmt.Errorf("stage codex machine fingerprint: %w", stageErr)
+		}
+		responsesBody = stagedBody
+	}
+
 	if account.Type == AccountTypeAPIKey {
 		if trimmedKey := strings.TrimSpace(promptCacheKey); trimmedKey != "" {
 			var reqBody map[string]any
@@ -262,18 +271,27 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
-	if shouldBindOpenAIUpstreamSessionAffinity(account) && promptCacheKey != "" {
-		apiKeyID := getAPIKeyIDFromContext(c)
-		upstreamSessionID := generateSessionUUID(isolateOpenAISessionID(apiKeyID, promptCacheKey))
-		upstreamReq.Header.Set("session_id", upstreamSessionID)
-		upstreamReq = WithOpenAIUpstreamSessionAffinity(upstreamReq, upstreamSessionID, "")
+	// 桥的会话头保持 r3 生产形态：generateSessionUUID(isolate(apiKeyID, 客户端
+	// cache key))。buildUpstreamRequest 内部派生的是 isolate 裸值形态，这里仅把
+	// session 换成 UUID 形态；conversation 维持 buildUpstreamRequest 已派生的
+	// 隔离值（r3：chat 桥 conversation 同隔离值随请求出站），终态 sanitizer 按
+	// 亲和等值保留两者。
+	if shouldUseOpenAIGatewaySessionAffinity(account) && strings.TrimSpace(promptCacheKey) != "" {
+		if bridgeAffinity := deriveOpenAIGatewaySessionAffinity(getAPIKeyIDFromContext(c), promptCacheKey, false); bridgeAffinity != nil {
+			bridgeAffinity.sessionID = generateSessionUUID(bridgeAffinity.sessionID)
+			if prior := openAIGatewaySessionAffinityFromContext(upstreamReq.Context()); prior != nil {
+				bridgeAffinity.conversationID = prior.conversationID
+			}
+			upstreamReq = upstreamReq.WithContext(withOpenAIGatewaySessionAffinity(upstreamReq.Context(), bridgeAffinity))
+			upstreamReq.Header.Set("session_id", bridgeAffinity.sessionID)
+		}
 	}
 	// Chat Completions builds the upstream request independently from the
 	// Responses path, so it must apply the same account-bound turn-state guard
 	// before the final header sanitizer. Unknown or cross-account client state
 	// must never reach the upstream.
 	s.guardOpenAICodexTurnStateEcho(c, account, upstreamReq.Header)
-	sanitizeCodexOutboundRequest(upstreamReq)
+	sanitizeCodexOutboundRequestWithFingerprint(upstreamReq, stagedCodexFingerprintIDsForAccount(c, account))
 
 	// 7. Send request
 	proxyURL := ""

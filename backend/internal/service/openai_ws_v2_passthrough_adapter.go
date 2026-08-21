@@ -752,16 +752,25 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, blocked.Message, blocked)
 	}
 	firstClientMessage = updatedFirst
+	// 指纹 body sink（仅 machine 有 staged IDs，见 ProxyResponsesWebSocketFromClient）：首帧在此改写，
+	// 后续 response.create 帧由下方 filter 改写；握手头由 buildOpenAIWSHeaders 内的头 sink 改写。
+	if fpFirst, fpChanged, fpErr := applyStagedCodexFingerprintClientMetadataRaw(c, account, firstClientMessage); fpErr != nil {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", fpErr)
+	} else if fpChanged {
+		firstClientMessage = fpFirst
+	}
 	promptCacheKeysByModel := make(map[string]string, 2)
 	clientPromptCacheKey := strings.TrimSpace(gjson.GetBytes(firstClientMessage, "prompt_cache_key").String())
 	if clientPromptCacheKey == "" {
 		clientPromptCacheKey = explicitOpenAIRequestSessionID(c, firstClientMessage)
 	}
-	sanitizedFirstMessage, _, sanitizeErr := sanitizeCodexOutboundJSON(firstClientMessage)
+	firstStagedIDs := stagedCodexFingerprintIDsForAccount(c, account)
+	firstMachineStaged := firstStagedIDs != nil && firstStagedIDs.mode == codexFingerprintMachine
+	sanitizedFirstMessage, _, sanitizeErr := sanitizeCodexOutboundJSONWithFingerprint(firstClientMessage, firstStagedIDs)
 	if sanitizeErr != nil {
 		return sanitizeErr
 	}
-	if account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) {
+	if account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) && !firstMachineStaged {
 		mappedModel := strings.TrimSpace(gjson.GetBytes(sanitizedFirstMessage, "model").String())
 		fallbackKey := deriveOpenAIOutboundPromptCacheKeyFallback(clientPromptCacheKey, mappedModel)
 		sanitizedFirstMessage, _, sanitizeErr = rewriteOpenAIOutboundPromptCacheKeyWithSessionFallback(
@@ -991,6 +1000,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 						payload = capped
 					}
 				}
+				// 指纹 body sink（仅 machine 有 staged IDs）：与首帧同一份 IDs，保证多 turn 假名一致。
+				// staged IDs 的幂等 memo 仅在本 goroutine（首帧写入已先于 relay 启动）内被读写。
+				if fpPayload, fpChanged, fpErr := applyStagedCodexFingerprintClientMetadataRaw(c, account, payload); fpErr != nil {
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", fpErr)
+				} else if fpChanged {
+					payload = fpPayload
+				}
 			}
 			turnNo := int(completedTurns.Load()) + 1
 			if turnNo < 2 {
@@ -1045,11 +1061,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			}
 			out, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, model, payload)
 			if policyErr == nil && blocked == nil {
-				sanitized, _, sanitizeErr := sanitizeCodexOutboundJSON(out)
+				frameStagedIDs := stagedCodexFingerprintIDsForAccount(c, account)
+				frameMachineStaged := frameStagedIDs != nil && frameStagedIDs.mode == codexFingerprintMachine
+				sanitized, _, sanitizeErr := sanitizeCodexOutboundJSONWithFingerprint(out, frameStagedIDs)
 				if sanitizeErr != nil {
 					return out, nil, sanitizeErr
 				}
-				if account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) {
+				if account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) && !frameMachineStaged {
 					mappedModel := strings.TrimSpace(gjson.GetBytes(sanitized, "model").String())
 					sanitized, _, sanitizeErr = rewriteOpenAIOutboundPromptCacheKeyWithSessionFallback(
 						sanitized,
@@ -1122,7 +1140,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				return msgType, payload, nil
 			}
 			if msgType == coderws.MessageText {
-				sanitized, _, sanitizeErr := sanitizeCodexOutboundJSON(payload)
+				sanitized, _, sanitizeErr := sanitizeCodexOutboundJSONWithFingerprint(payload, stagedCodexFingerprintIDsForAccount(c, account))
 				if sanitizeErr != nil {
 					return msgType, payload, sanitizeErr
 				}

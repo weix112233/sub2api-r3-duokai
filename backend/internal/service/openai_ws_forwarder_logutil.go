@@ -42,6 +42,14 @@ func openAIWSHeaderValueForLog(headers http.Header, key string) string {
 	if headers == nil {
 		return "-"
 	}
+	// Codex 标识符头（session/thread/installation/window 等）的值是客户端或
+	// 网关签发的身份原语，进日志前整体脱敏，避免把会话身份写进运维日志。
+	if isCodexOutboundIdentifierKey(key) {
+		if strings.TrimSpace(headers.Get(key)) == "" {
+			return "-"
+		}
+		return "<redacted>"
+	}
 	return truncateOpenAIWSLogValue(headers.Get(key), openAIWSHeaderValueMaxLen)
 }
 
@@ -477,7 +485,8 @@ func dropOpenAIWSPayloadKey(payload map[string]any, key string, removed *[]strin
 
 // applyOpenAIWSRetryPayloadStrategy 在 WS 连续失败时仅移除无语义字段，
 // 避免重试成功却改变原始请求语义。
-// 注意：prompt_cache_key 不应在重试中移除；它常用于会话稳定标识（session_id 兜底）。
+// 注意：prompt_cache_key 不应在重试中移除；它用于保持本地缓存语义，
+// 不会被转写为 session_id/conversation_id 出站头。
 func applyOpenAIWSRetryPayloadStrategy(payload map[string]any, attempt int) (strategy string, removedKeys []string) {
 	if len(payload) == 0 {
 		return "empty", nil

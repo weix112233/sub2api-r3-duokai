@@ -86,6 +86,26 @@ var openaiAllowedHeaders = map[string]bool{
 	responsesLiteHeaderKey:    true,
 }
 
+// openaiCodexSessionIdentityHeaders 是 Codex 会话/子 Agent 身份头（codex-api/src/requests/headers.rs
+// build_session_headers、core/src/client.rs X_CODEX_* / X_OPENAI_SUBAGENT_HEADER），**仅 machine 模式**
+// 的 /responses 两条 HTTP 链路放行（isOpenAIResponsesClientHeaderAllowed / isOpenAIPassthroughAllowedRequestHeader），
+// machine 头 sink 会对其中身份值做假名化；off/device/session/full 维持原有行为（HTTP 丢弃），与 WS 握手
+// 拷贝列表（openai_ws_forwarder_payload.go）的 machine 分支逐键对齐。不并入 openaiPassthroughAllowedHeaders：
+// 该集合还被 /v1/images/* 复用（openai_images.go），图片链路没有指纹改写，不应放行会话身份头。
+var openaiCodexSessionIdentityHeaders = map[string]bool{
+	"session-id":               true,
+	"thread-id":                true,
+	"x-client-request-id":      true,
+	"x-openai-subagent":        true,
+	"x-codex-parent-thread-id": true,
+}
+
+// isOpenAIResponsesClientHeaderAllowed 非透传 /responses 链路的客户端头放行判定；
+// codexMachine 为账号有效指纹模式是否为 machine（activeCodexFingerprintMode）。
+func isOpenAIResponsesClientHeaderAllowed(lowerKey string, codexMachine bool) bool {
+	return openaiAllowedHeaders[lowerKey] || (codexMachine && openaiCodexSessionIdentityHeaders[lowerKey])
+}
+
 // OpenAI passthrough allowed headers whitelist.
 // 透传模式下仅放行这些低风险请求头，避免将非标准/环境噪声头传给上游触发风控。
 var openaiPassthroughAllowedHeaders = map[string]bool{

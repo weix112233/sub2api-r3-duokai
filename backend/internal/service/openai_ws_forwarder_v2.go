@@ -65,12 +65,35 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	payload := s.buildOpenAIWSCreatePayload(reqBody, account)
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
-	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
-	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
+	// 锚点捕获必须在指纹改写之前：machine sink 会把 payload 的 prompt_cache_key
+	// 换成 1:1 假名，会话亲和与「客户端是否显式携带 pck」的判定都要锚定原始值。
 	clientPromptCacheKey := openAIWSPayloadString(payload, "prompt_cache_key")
+	explicitPayloadPromptCacheKey := strings.TrimSpace(clientPromptCacheKey) != ""
 	if clientPromptCacheKey == "" {
 		clientPromptCacheKey = explicitOpenAIRequestSessionID(c, payloadAsJSONBytes(payload))
 	}
+	if c != nil && c.Request != nil {
+		c.Request = c.Request.WithContext(
+			withOpenAIWSPromptCacheKeyPresence(c.Request.Context(), explicitPayloadPromptCacheKey),
+		)
+		c.Request = c.Request.WithContext(
+			withOpenAIWSClientPromptCacheKey(c.Request.Context(), clientPromptCacheKey),
+		)
+	}
+	// 指纹收敛：turn 头提前读取（与 body sink 同点执行，确保 machine 改写
+	// client_metadata（含内嵌 turn metadata）发生在 previous_response_id 读取、
+	// 日志、序列化之前）；WS 链路的 body sink 必须幂等（Forward + ws_forwarder_v2
+	// + 重试会多次对同一 map 应用）。
+	turnState := ""
+	turnMetadata := ""
+	if c != nil && c.Request != nil {
+		turnState = strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
+		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
+	}
+	setOpenAIWSTurnMetadata(payload, turnMetadata)
+	applyStagedCodexFingerprintClientMetadata(c, account, payload)
+	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
+	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 	promptCacheKey := clientPromptCacheKey
 	_, hasTools := payload["tools"]
 	debugEnabled := isOpenAIWSModeDebugEnabled()
@@ -86,26 +109,29 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if raw, ok := payload["stream"]; ok {
 		streamValue = normalizeOpenAIWSLogValue(strings.TrimSpace(fmt.Sprintf("%v", raw)))
 	}
-	turnState := ""
-	turnMetadata := ""
-	if c != nil && c.Request != nil {
-		turnState = strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
-		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
-	}
-	setOpenAIWSTurnMetadata(payload, turnMetadata)
-	sanitizeCodexOutboundMap(payload)
+	stagedIDs := stagedCodexFingerprintIDsForAccount(c, account)
+	machineStaged := stagedIDs != nil && stagedIDs.mode == codexFingerprintMachine
+	sanitizeCodexOutboundMapValueWithFingerprint(payload, true, true, stagedIDs)
 	if account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) {
-		fallbackKey := deriveOpenAIOutboundPromptCacheKeyFallback(clientPromptCacheKey, mappedModel)
-		derivedKey, rewriteErr := rewriteOpenAIOutboundPromptCacheKeyMapWithFallback(
-			payload,
-			mappedModel,
-			fallbackKey,
-		)
-		if rewriteErr != nil {
-			return nil, wrapOpenAIWSFallback("rewrite_prompt_cache_key", rewriteErr)
+		if machineStaged {
+			// machine 的 body sink 已把 prompt_cache_key 做成 1:1 假名（网关产物，
+			// 上面的 sanitizer 已保留）；pcv2 网关键改写会破坏「同一会话同一假名」，
+			// 跳过改写，出站值即 payload 当前值。
+			promptCacheKey = strings.TrimSpace(openAIWSPayloadString(payload, "prompt_cache_key"))
+			setOpenAIOutboundPromptCacheKey(c, promptCacheKey)
+		} else {
+			fallbackKey := deriveOpenAIOutboundPromptCacheKeyFallback(clientPromptCacheKey, mappedModel)
+			derivedKey, rewriteErr := rewriteOpenAIOutboundPromptCacheKeyMapWithFallback(
+				payload,
+				mappedModel,
+				fallbackKey,
+			)
+			if rewriteErr != nil {
+				return nil, wrapOpenAIWSFallback("rewrite_prompt_cache_key", rewriteErr)
+			}
+			promptCacheKey = derivedKey
+			setOpenAIOutboundPromptCacheKey(c, promptCacheKey)
 		}
-		promptCacheKey = derivedKey
-		setOpenAIOutboundPromptCacheKey(c, promptCacheKey)
 	}
 	payloadEventType := openAIWSPayloadString(payload, "type")
 	if payloadEventType == "" {

@@ -72,22 +72,27 @@ func TestSanitizeCodexOutboundHeaders_RemovesAllIdentifierCarriers(t *testing.T)
 	require.Equal(t, "zh-CN", headers.Get("Accept-Language"))
 }
 
-func TestSanitizeCodexOutboundRequest_RestoresOnlyBoundSessionAffinity(t *testing.T) {
+func TestOpenAIWSHeaderValueForLog_RedactsIdentifiers(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("session_id", "session-value")
+	headers.Set("conversation_id", "conversation-value")
+	headers.Set("user-agent", "safe-user-agent")
+
+	require.Equal(t, "<redacted>", openAIWSHeaderValueForLog(headers, "session_id"))
+	require.Equal(t, "<redacted>", openAIWSHeaderValueForLog(headers, "conversation_id"))
+	require.Equal(t, "safe-user-agent", openAIWSHeaderValueForLog(headers, "user-agent"))
+}
+
+func TestSanitizeCodexOutboundRequest_DropsSessionAffinityEvenWhenContextWasBound(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	req.Header.Set("session_id", "raw-client-session")
 	req.Header.Set("conversation_id", "raw-client-conversation")
 	req.Header.Set("x-codex-thread-id", "raw-client-thread")
 	req.Header.Set("x-request-id", "raw-request-id")
 
-	isolatedSessionID := isolateOpenAISessionID(77, "raw-client-session")
-	isolatedConversationID := isolateOpenAISessionID(77, "raw-client-conversation")
-	req = WithOpenAIUpstreamSessionAffinity(req, isolatedSessionID, isolatedConversationID)
-
 	require.True(t, sanitizeCodexOutboundRequest(req))
-	require.Equal(t, isolatedSessionID, req.Header.Get("session_id"))
-	require.Equal(t, isolatedConversationID, req.Header.Get("conversation_id"))
-	require.NotEqual(t, "raw-client-session", req.Header.Get("session_id"))
-	require.NotEqual(t, "raw-client-conversation", req.Header.Get("conversation_id"))
+	require.Empty(t, req.Header.Get("session_id"))
+	require.Empty(t, req.Header.Get("conversation_id"))
 	require.Empty(t, req.Header.Get("x-codex-thread-id"))
 	require.Empty(t, req.Header.Get("x-request-id"))
 }
@@ -100,6 +105,123 @@ func TestSanitizeCodexOutboundRequest_DropsUnboundRawSessionIdentifiers(t *testi
 	require.True(t, sanitizeCodexOutboundRequest(req))
 	require.Empty(t, req.Header.Get("session_id"))
 	require.Empty(t, req.Header.Get("conversation_id"))
+}
+
+func TestSanitizeCodexOutboundRequest_PreservesBoundGatewayAffinityOnly(t *testing.T) {
+	affinity := deriveOpenAIGatewaySessionAffinity(77, "pcv2-stable-session", true)
+	require.NotNil(t, affinity)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req = req.WithContext(withOpenAIGatewaySessionAffinity(req.Context(), affinity))
+	req.Header.Set("session_id", affinity.sessionID)
+	req.Header.Set("conversation_id", affinity.conversationID)
+	req.Header.Set("x-codex-thread-id", "raw-client-thread")
+
+	require.True(t, sanitizeCodexOutboundRequest(req))
+	require.Equal(t, affinity.sessionID, req.Header.Get("session_id"))
+	require.Equal(t, affinity.conversationID, req.Header.Get("conversation_id"))
+	require.Empty(t, req.Header.Get("x-codex-thread-id"))
+}
+
+// r3 fail-closed 语义下「staged 值可保留」仅存在于 machine 模式：installation 为
+// 账号级收敛恒定值，会话/线程/窗口身份为 machine sink 已签发的 1:1 假名；session/
+// device/full 的收敛值与客户端原始值同样删除（与 r3 生产出站一致）。
+func TestSanitizeCodexOutboundHeaders_PreservesOnlyStagedFingerprintValues(t *testing.T) {
+	account := newTestOAuthAccount(5101, map[string]any{
+		codexFingerprintModeExtraKey: string(codexFingerprintMachine),
+		codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
+	})
+	ids := resolveCodexFingerprintIDsFromRequest(account, nil)
+	require.NotNil(t, ids)
+	require.Equal(t, codexFingerprintMachine, ids.mode)
+
+	pSession := ids.machinePseudonym("raw-client-session")
+	pThread := ids.machinePseudonym("01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a")
+	pWindow := ids.machineWindowPseudonym("01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a:0")
+	require.NotEmpty(t, pSession)
+	require.NotEmpty(t, pWindow)
+
+	headers := http.Header{}
+	headers.Set("x-codex-installation-id", ids.installationID)
+	headers.Set("session-id", pSession)
+	headers.Set("thread-id", pThread)
+	headers.Set("x-client-request-id", pThread)
+	headers.Set("x-codex-window-id", pWindow)
+	headers.Set("installation-id", "raw-client-installation")
+	headers.Set("session_id", "raw-client-session")
+	headers.Set("conversation_id", "raw-client-conversation")
+	headers.Set("x-codex-turn-metadata", `{"installation_id":"`+ids.installationID+`","session_id":"`+pSession+`","thread_id":"`+pThread+`","window_id":"`+pWindow+`","turn_id":"turn-real","sandbox":"client-value"}`)
+
+	require.True(t, sanitizeCodexOutboundHeadersWithFingerprint(headers, ids))
+	require.Equal(t, ids.installationID, headers.Get("x-codex-installation-id"))
+	require.Equal(t, pSession, headers.Get("session-id"))
+	require.Equal(t, pThread, headers.Get("thread-id"))
+	require.Equal(t, pThread, headers.Get("x-client-request-id"))
+	require.Equal(t, pWindow, headers.Get("x-codex-window-id"))
+	require.Empty(t, headers.Get("installation-id"))
+	require.Empty(t, headers.Get("session_id"))
+	require.Empty(t, headers.Get("conversation_id"))
+
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(headers.Get("x-codex-turn-metadata")), &metadata))
+	require.Equal(t, ids.installationID, metadata["installation_id"])
+	require.Equal(t, pSession, metadata["session_id"])
+	require.Equal(t, pThread, metadata["thread_id"])
+	require.Equal(t, pWindow, metadata["window_id"])
+	// turn 级字段透传（真实 Codex 每 turn 自带随机 turn id / sandbox）。
+	require.Equal(t, "turn-real", metadata["turn_id"])
+	require.Equal(t, "client-value", metadata["sandbox"])
+
+	// 同形未签发值（攻击面：同 seed 下其它输入的假名形态）不得因形状猜测被保留。
+	// 注意同输入重算必得同假名（HMAC 确定性）且已在签发备忘中，故用不同输入。
+	headers2 := http.Header{}
+	headers2.Set("session-id", codexMachinePseudonym([]byte(testCodexFingerprintSeed), "another-client-session"))
+	sanitizeCodexOutboundHeadersWithFingerprint(headers2, ids)
+	require.Empty(t, headers2.Get("session-id"), "未登记签发的同形假名不得保留")
+}
+
+func TestSanitizeCodexOutboundJSONWithFingerprint_PreservesGatewayValuesAndDropsClientValues(t *testing.T) {
+	account := newTestOAuthAccount(5102, map[string]any{
+		codexFingerprintModeExtraKey: string(codexFingerprintMachine),
+		codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
+	})
+	ids := resolveCodexFingerprintIDsFromRequest(account, nil)
+	require.NotNil(t, ids)
+	require.Equal(t, codexFingerprintMachine, ids.mode)
+
+	pSession := ids.machinePseudonym("raw-client-session")
+	pThread := ids.machinePseudonym("01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a")
+	pWindow := ids.machineWindowPseudonym("01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a:0")
+
+	body := []byte(`{"installation_id":"raw-client-installation","session_id":"raw-client-session","client_metadata":{"installation_id":"` +
+		ids.installationID + `","session_id":"` + pSession + `","thread_id":"` + pThread +
+		`","turn_id":"turn-real","window_id":"` + pWindow +
+		`","sandbox":"client-value","x-codex-turn-metadata":"{\"installation_id\":\"` +
+		ids.installationID + `\",\"session_id\":\"` + pSession + `\",\"thread_id\":\"` + pThread +
+		`\",\"turn_id\":\"turn-real\",\"window_id\":\"` + pWindow + `\",\"sandbox\":\"client-value\"}"}}`)
+
+	sanitized, changed, err := sanitizeCodexOutboundJSONWithFingerprint(body, ids)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(sanitized, &decoded))
+	require.NotContains(t, decoded, "installation_id")
+	require.NotContains(t, decoded, "session_id")
+	clientMetadata := decoded["client_metadata"].(map[string]any)
+	require.Equal(t, ids.installationID, clientMetadata["installation_id"])
+	require.Equal(t, pSession, clientMetadata["session_id"])
+	require.Equal(t, pThread, clientMetadata["thread_id"])
+	require.Equal(t, pWindow, clientMetadata["window_id"])
+	// machine：turn 级字段（turn_id / sandbox）按规格透传。
+	require.Equal(t, "turn-real", clientMetadata["turn_id"])
+	require.Equal(t, "client-value", clientMetadata["sandbox"])
+
+	var embedded map[string]any
+	require.NoError(t, json.Unmarshal([]byte(clientMetadata["x-codex-turn-metadata"].(string)), &embedded))
+	require.Equal(t, ids.installationID, embedded["installation_id"])
+	require.Equal(t, "turn-real", embedded["turn_id"])
+	require.Equal(t, "client-value", embedded["sandbox"])
 }
 
 func TestSanitizeCodexOutboundJSON_RemovesNestedIdentifiersAndMetadata(t *testing.T) {

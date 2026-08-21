@@ -232,6 +232,15 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		}
 	}
 
+	// machine 指纹：桥不经过 Forward，仅 machine 模式在此 stage（体 sink 在此、头 sink 在 buildUpstreamRequest）。
+	if account.Type == AccountTypeOAuth && account.Platform != PlatformGrok {
+		stagedBody, stageErr := s.stageCodexMachineFingerprintIDsForCompatBridge(c, account, responsesBody)
+		if stageErr != nil {
+			return nil, fmt.Errorf("stage codex machine fingerprint: %w", stageErr)
+		}
+		responsesBody = stagedBody
+	}
+
 	// For API key accounts (including OpenAI-compatible upstream gateways),
 	// ensure promptCacheKey is also propagated via the request body so that
 	// upstreams using the Responses API can derive a stable session identifier
@@ -318,25 +327,12 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
-	// Override session_id with a deterministic UUID derived from the isolated
-	// session key, ensuring different API keys produce different upstream sessions.
-	if shouldBindOpenAIUpstreamSessionAffinity(account) &&
-		!isOpenAICompatMessagesBridgeContext(c) &&
-		promptCacheKey != "" {
-		isolatedSessionID := generateSessionUUID(isolateOpenAISessionID(apiKeyID, promptCacheKey))
-		upstreamReq.Header.Set("session_id", isolatedSessionID)
-		isolatedConversationID := ""
-		if upstreamReq.Header.Get("conversation_id") != "" {
-			isolatedConversationID = isolatedSessionID
-			upstreamReq.Header.Set("conversation_id", isolatedConversationID)
-		}
-		upstreamReq = WithOpenAIUpstreamSessionAffinity(
-			upstreamReq,
-			isolatedSessionID,
-			isolatedConversationID,
-		)
-	}
-	sanitizeCodexOutboundRequest(upstreamReq)
+	// messages 桥的会话头由 buildUpstreamRequest 的亲和派生以 r3 生产形态设置：
+	// isolate(apiKeyID, seed) 16-hex（兼容桥保留稳定隔离会话，conversation 兜底
+	// 不自动补）。r3 自身在桥 flag 置位后不再有额外的 UUID 形态覆盖块，此处保持
+	// 一致，不再叠加第二层会话头改写。
+
+	sanitizeCodexOutboundRequestWithFingerprint(upstreamReq, stagedCodexFingerprintIDsForAccount(c, account))
 	if account.Type == AccountTypeOAuth && account.Platform != PlatformGrok {
 		// buildUpstreamRequest 保留 Messages bridge 的 body/session 兼容行为，并会先
 		// 清除身份头。真正发送前恢复完整 Codex 身份，避免 ChatGPT Codex 上游因缺失
@@ -351,17 +347,12 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 	if account.Type == AccountTypeOAuth && promptCacheKey != "" && strings.TrimSpace(c.GetHeader("conversation_id")) == "" {
 		upstreamReq.Header.Del("conversation_id")
-		upstreamReq = WithOpenAIUpstreamSessionAffinity(
-			upstreamReq,
-			upstreamReq.Header.Get("session_id"),
-			"",
-		)
 	}
 	if compatTurnState != "" && upstreamReq.Header.Get("x-codex-turn-state") == "" {
 		upstreamReq.Header.Set("x-codex-turn-state", compatTurnState)
 	}
 	s.guardOpenAICodexTurnStateEcho(c, account, upstreamReq.Header)
-	sanitizeCodexOutboundRequest(upstreamReq)
+	sanitizeCodexOutboundRequestWithFingerprint(upstreamReq, stagedCodexFingerprintIDsForAccount(c, account))
 
 	// 7. Send request
 	proxyURL := ""

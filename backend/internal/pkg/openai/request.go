@@ -323,6 +323,28 @@ func rewriteCodexUATrailerVersion(ua, version string) string {
 	return ua[:open+1] + name + "; " + version + ua[open+1+closeIdx:]
 }
 
+// CodexUserAgentOSSegment 提取 Codex 形态 UA 首个括号组里 `;` 之前的 OS 段
+// （如 `Mac OS 26.0.1` / `Ubuntu 22.4.0` / `Windows 10.0.26100`）。
+// Codex UA 形态：`{originator}/{version} ({os_type} {os_version}; {arch}) {terminal}`
+// （codex-rs login/src/auth/default_client.rs get_codex_user_agent）。
+// 无括号、括号未闭合、括号内为空 ⇒ 空串。纯函数，供 machine 模式推导 sandbox 标签。
+func CodexUserAgentOSSegment(userAgent string) string {
+	ua := strings.TrimSpace(userAgent)
+	open := strings.IndexByte(ua, '(')
+	if open < 0 {
+		return ""
+	}
+	closeIdx := strings.IndexByte(ua[open+1:], ')')
+	if closeIdx < 0 {
+		return ""
+	}
+	inner := ua[open+1 : open+1+closeIdx]
+	if semi := strings.IndexByte(inner, ';'); semi >= 0 {
+		inner = inner[:semi]
+	}
+	return strings.TrimSpace(inner)
+}
+
 // codexEngineVersionPattern 提取版本段开头的三段数字 X.Y.Z（忽略 -alpha 等后缀）。
 var codexEngineVersionPattern = regexp.MustCompile(`^(\d+\.\d+\.\d+)`)
 

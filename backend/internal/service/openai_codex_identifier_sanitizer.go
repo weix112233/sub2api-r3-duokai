@@ -1,12 +1,14 @@
 package service
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 // codexOutboundIdentifierKeys are protocol identity fields that must stay
@@ -291,93 +293,103 @@ func isCodexOutboundMetadataKey(key string) bool {
 // It deliberately runs after all account overrides and identity construction
 // so later compatibility code cannot re-introduce client or proxy IDs.
 func sanitizeCodexOutboundHeaders(headers http.Header) bool {
+	return sanitizeCodexOutboundHeadersWithFingerprint(headers, nil)
+}
+
+// sanitizeCodexOutboundHeadersWithFingerprint removes client identifiers while
+// retaining only values produced by the current gateway fingerprint attempt.
+// Matching is exact and source-bound; UUID shape or other value formats are
+// never used as proof of gateway ownership.
+func sanitizeCodexOutboundHeadersWithFingerprint(
+	headers http.Header,
+	ids *codexFingerprintIDs,
+) bool {
+	return sanitizeCodexOutboundHeadersWithFingerprintAndAffinity(headers, ids, nil)
+}
+
+func sanitizeCodexOutboundHeadersWithFingerprintAndAffinity(
+	headers http.Header,
+	ids *codexFingerprintIDs,
+	affinity *openAIGatewaySessionAffinity,
+) bool {
 	if headers == nil {
 		return false
 	}
 	changed := false
+	removedCount := 0
 	for key := range headers {
 		if !isCodexOutboundIdentifierKey(key) {
 			continue
 		}
+		if isCodexOutboundTurnMetadataKey(key) {
+			rebuilt, keep := sanitizeGatewayTurnMetadataHeader(headers.Get(key), ids)
+			if keep {
+				if headers.Get(key) != rebuilt {
+					headers.Set(key, rebuilt)
+					changed = true
+				}
+				continue
+			}
+		}
+		if isGatewayCodexIdentifierHeaderValue(key, headers.Get(key), ids) ||
+			isGatewayOpenAIAffinityHeaderValue(key, headers.Get(key), affinity) {
+			continue
+		}
 		delete(headers, key)
 		changed = true
+		removedCount++
 	}
-	return changed
-}
-
-type openAIUpstreamSessionAffinityContextKey struct{}
-
-type openAIUpstreamSessionAffinity struct {
-	sessionID      string
-	conversationID string
-}
-
-func shouldBindOpenAIUpstreamSessionAffinity(account *Account) bool {
-	return account != nil &&
-		account.Type == AccountTypeOAuth &&
-		!account.IsOpenAIAgentIdentity()
-}
-
-// WithOpenAIUpstreamSessionAffinity binds gateway-generated session affinity
-// to the request context. Callers must pass only values derived locally from
-// real request session semantics, never raw client identifiers.
-func WithOpenAIUpstreamSessionAffinity(req *http.Request, sessionID, conversationID string) *http.Request {
-	if req == nil {
-		return nil
-	}
-	affinity := openAIUpstreamSessionAffinity{
-		sessionID:      strings.TrimSpace(sessionID),
-		conversationID: strings.TrimSpace(conversationID),
-	}
-	return req.WithContext(context.WithValue(
-		req.Context(),
-		openAIUpstreamSessionAffinityContextKey{},
-		affinity,
-	))
-}
-
-func openAIUpstreamSessionAffinityFromRequest(req *http.Request) openAIUpstreamSessionAffinity {
-	if req == nil {
-		return openAIUpstreamSessionAffinity{}
-	}
-	affinity, _ := req.Context().Value(openAIUpstreamSessionAffinityContextKey{}).(openAIUpstreamSessionAffinity)
-	return affinity
-}
-
-func sanitizeCodexOutboundHeadersWithSessionAffinity(
-	headers http.Header,
-	sessionID string,
-	conversationID string,
-) bool {
-	changed := sanitizeCodexOutboundHeaders(headers)
-	if headers == nil {
-		return changed
-	}
-	restore := func(name, value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
+	// r3 恢复语义：终态删除后把亲和隔离值重新写回（session/full 的收敛头 sink 会
+	// 覆盖掉此前设置的亲和值，删除后必须恢复，r3 生产即如此）。machine 不恢复
+	// 下划线头——machine 规格要求连字符假名头承载会话身份，下划线一律删除。
+	if affinity != nil && (ids == nil || ids.mode != codexFingerprintMachine) {
+		restore := func(name, value string) {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				return
+			}
+			if headers.Get(name) != value {
+				headers.Set(name, value)
+				changed = true
+			}
 		}
-		if headers.Get(name) != value {
-			headers.Set(name, value)
-			changed = true
-		}
+		restore("session_id", affinity.sessionID)
+		restore("conversation_id", affinity.conversationID)
 	}
-	restore("session_id", sessionID)
-	restore("conversation_id", conversationID)
+	if removedCount > 0 {
+		slog.Debug(
+			"openai.identifier_sanitized",
+			"surface", "headers",
+			"removed_count", removedCount,
+		)
+	}
 	return changed
 }
 
 func sanitizeCodexOutboundRequest(req *http.Request) bool {
+	return sanitizeCodexOutboundRequestWithFingerprint(req, nil)
+}
+
+func sanitizeCodexOutboundRequestWithFingerprint(req *http.Request, ids *codexFingerprintIDs) bool {
 	if req == nil {
 		return false
 	}
-	affinity := openAIUpstreamSessionAffinityFromRequest(req)
-	return sanitizeCodexOutboundHeadersWithSessionAffinity(
-		req.Header,
-		affinity.sessionID,
-		affinity.conversationID,
+	return sanitizeCodexOutboundRequestWithFingerprintAndAffinity(
+		req,
+		ids,
+		openAIGatewaySessionAffinityFromContext(req.Context()),
 	)
+}
+
+func sanitizeCodexOutboundRequestWithFingerprintAndAffinity(
+	req *http.Request,
+	ids *codexFingerprintIDs,
+	affinity *openAIGatewaySessionAffinity,
+) bool {
+	if req == nil {
+		return false
+	}
+	return sanitizeCodexOutboundHeadersWithFingerprintAndAffinity(req.Header, ids, affinity)
 }
 
 // SanitizeCodexOutboundHeaders is the transport-level fallback for callers
@@ -399,10 +411,19 @@ func SanitizeCodexOutboundRequest(req *http.Request) bool {
 // already decoded upstream payload. Extended metadata is removed only below
 // client_metadata so user input and tool arguments remain intact.
 func sanitizeCodexOutboundMap(value any) bool {
-	return sanitizeCodexOutboundMapValue(value, true, true)
+	return sanitizeCodexOutboundMapValueWithFingerprint(value, true, true, nil)
 }
 
 func sanitizeCodexOutboundMapValue(value any, protocolEnvelope bool, rootEnvelope bool) bool {
+	return sanitizeCodexOutboundMapValueWithFingerprint(value, protocolEnvelope, rootEnvelope, nil)
+}
+
+func sanitizeCodexOutboundMapValueWithFingerprint(
+	value any,
+	protocolEnvelope bool,
+	rootEnvelope bool,
+	ids *codexFingerprintIDs,
+) bool {
 	switch current := value.(type) {
 	case map[string]any:
 		changed := false
@@ -416,6 +437,35 @@ func sanitizeCodexOutboundMapValue(value any, protocolEnvelope bool, rootEnvelop
 				if normalizedKey == "prompt_cache_key" && isGatewayPromptCacheKeyValue(nested) {
 					continue
 				}
+				if isCodexOutboundTurnMetadataKey(key) {
+					if rebuilt, keep := sanitizeGatewayTurnMetadataValue(nested, ids); keep {
+						if rebuilt != nested {
+							current[key] = rebuilt
+							changed = true
+						}
+						continue
+					}
+				}
+				if isGatewayCodexIdentifierValue(key, nested, ids) {
+					continue
+				}
+				// machine 模式：client_metadata 的 turn_id 属 turn 级字段，按规格
+				// 透传（真实 Codex 每 turn 自带随机 turn id，与账号身份不相关）；
+				// 其余身份键仍只保留网关签发值。
+				if ids != nil && ids.mode == codexFingerprintMachine && normalizedKey == "turn_id" {
+					continue
+				}
+				// machine 模式：metadata 行为字段（sandbox / workspaces / mcp 等，
+				// 与 turn-metadata 内同一套透传规格）不属于账号身份，原样透传；
+				// 身份关联键仍走上面的签发值判定。仅 metadata 键放行——标识/
+				// 追踪键（identifier 非 metadata）不在其列，避免 client 侧追踪头
+				// 借道透传。
+				if ids != nil &&
+					ids.mode == codexFingerprintMachine &&
+					metadataKey &&
+					!isCodexMachineTurnMetadataIdentityKey(key) {
+					continue
+				}
 				delete(current, key)
 				changed = true
 				continue
@@ -426,7 +476,7 @@ func sanitizeCodexOutboundMapValue(value any, protocolEnvelope bool, rootEnvelop
 					compactKey == "clientmetadata" ||
 					compactKey == "turnmetadata" ||
 					compactKey == "xcodexturnmetadata")
-			if sanitizeCodexOutboundMapValue(nested, childProtocolEnvelope, false) {
+			if sanitizeCodexOutboundMapValueWithFingerprint(nested, childProtocolEnvelope, false, ids) {
 				changed = true
 			}
 		}
@@ -434,11 +484,212 @@ func sanitizeCodexOutboundMapValue(value any, protocolEnvelope bool, rootEnvelop
 	case []any:
 		changed := false
 		for _, nested := range current {
-			if sanitizeCodexOutboundMapValue(nested, protocolEnvelope, false) {
+			if sanitizeCodexOutboundMapValueWithFingerprint(nested, protocolEnvelope, false, ids) {
 				changed = true
 			}
 		}
 		return changed
+	default:
+		return false
+	}
+}
+
+func isCodexOutboundTurnMetadataKey(key string) bool {
+	normalized := normalizeCodexOutboundKey(key)
+	return normalized == "x_codex_turn_metadata" || normalized == "turn_metadata"
+}
+
+func isGatewayCodexIdentifierValue(key string, value any, ids *codexFingerprintIDs) bool {
+	raw, ok := value.(string)
+	if !ok {
+		return false
+	}
+	return isGatewayCodexIdentifierString(key, raw, ids)
+}
+
+func isGatewayCodexIdentifierHeaderValue(key, value string, ids *codexFingerprintIDs) bool {
+	return isGatewayCodexIdentifierString(key, value, ids)
+}
+
+func isGatewayCodexIdentifierString(key, value string, ids *codexFingerprintIDs) bool {
+	if ids == nil {
+		return false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	// 仅 machine 模式存在「网关产物可保留」的豁免：
+	// - 会话/窗口身份是按值签发的 1:1 假名（HMAC(seed, 原值)），不落在 ids 的
+	//   sessionID/threadID 等固定字段上；签发时记入 pseudonymIssued 备忘（见
+	//   machinePseudonym），以成员判定作为网关产物证明——绝不用 UUID 形状猜测。
+	// - installation 是账号级收敛恒定值（与真实设备安装 ID 同构）。
+	// session/device/full 的收敛值不豁免：r3 生产终态 sanitizer 对非 machine
+	// 一律 fail-closed 删除（含本网关收敛头），候选版保持该出站形状不变。
+	if ids.mode != codexFingerprintMachine {
+		return false
+	}
+	if isCodexMachineIssuedIdentifierValue(key, value, ids) {
+		return true
+	}
+	switch normalizeCodexOutboundKey(key) {
+	case "installation_id", "x_codex_installation_id":
+		return ids.installationID != "" && value == ids.installationID
+	default:
+		return false
+	}
+}
+
+// isCodexMachineIssuedIdentifierValue 判定 value 是否为本次 machine attempt 已签发的
+// 假名。只覆盖 machine sink 会改写的身份键（含连字符/下划线两种拼写，normalize 后
+// 同一形态）；installation 走上面的等值分支（ids.installationID 恒有值），不在此列。
+func isCodexMachineIssuedIdentifierValue(key, value string, ids *codexFingerprintIDs) bool {
+	normalized := normalizeCodexOutboundKey(key)
+	switch normalized {
+	case "session_id", "x_codex_session_id",
+		"thread_id", "x_codex_thread_id", "x_client_request_id",
+		"parent_thread_id", "x_codex_parent_thread_id",
+		"prompt_cache_key":
+		_, issued := ids.pseudonymIssued[value]
+		return issued
+	case "window_id", "x_codex_window_id":
+		return isCodexMachineIssuedWindowValue(value, ids)
+	default:
+		return false
+	}
+}
+
+// isCodexMachineIssuedWindowValue 判定窗口假名：machineWindowPseudonym 只产生
+// 「基础假名」或「基础假名:计数」两种形态（codexMachineWindowPseudonymWith），
+// 成员判定同样按这两种形态精确匹配。
+func isCodexMachineIssuedWindowValue(value string, ids *codexFingerprintIDs) bool {
+	if _, issued := ids.pseudonymIssued[value]; issued {
+		return true
+	}
+	idx := strings.LastIndex(value, ":")
+	if idx <= 0 || idx == len(value)-1 {
+		return false
+	}
+	for _, r := range value[idx+1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	_, issued := ids.pseudonymIssued[value[:idx]]
+	return issued
+}
+
+func sanitizeGatewayTurnMetadataHeader(raw string, ids *codexFingerprintIDs) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	// machine：键序保持的过滤式清洗。真实 Codex 的 turn metadata 由 serde 按声明序
+	// 序列化，map 重编码会把键序变成字母序，成为可观测的网关痕迹（machine sink 的
+	// gjson/sjson 原位改写即为此，见 rewriteCodexMachineTurnMetadata）。清洗只按规则
+	// 保留/删除字段、不改写值，保序输出即可。非 machine 维持 r3 原有 map 重建形态。
+	if ids != nil && ids.mode == codexFingerprintMachine {
+		return sanitizeGatewayMachineTurnMetadataOrdered(trimmed, ids)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &metadata); err != nil {
+		return "", false
+	}
+	sanitizeGatewayTurnMetadataMap(metadata, ids)
+	if len(metadata) == 0 {
+		return "", false
+	}
+	rebuilt, err := json.Marshal(metadata)
+	if err != nil {
+		return "", false
+	}
+	return string(rebuilt), true
+}
+
+// sanitizeGatewayMachineTurnMetadataOrdered 是 turn metadata 头/内嵌值的 machine
+// 保序清洗：先按 map 语义去重顶层键（保留最后一次出现，与 sanitizeGatewayTurnMetadataMap
+// 在 map 上的"后者覆盖"一致），再按 machine 规则过滤——身份键只留网关签发/收敛值，
+// 其余键（turn_id、sandbox、compaction 等行为字段）透传。全部字段被删时返回 false。
+func sanitizeGatewayMachineTurnMetadataOrdered(raw string, ids *codexFingerprintIDs) (string, bool) {
+	if raw == "" || !gjson.Valid(raw) {
+		return "", false
+	}
+	metadata := gjson.Parse(raw)
+	if !metadata.IsObject() {
+		return "", false
+	}
+	deduped, _ := dedupeCodexTurnMetadataTopLevelKeys(metadata)
+	metadata = gjson.Parse(deduped)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	wrote := false
+	metadata.ForEach(func(k, v gjson.Result) bool {
+		key := k.String()
+		if !isGatewayCodexIdentifierValue(key, v.Value(), ids) &&
+			isCodexMachineTurnMetadataIdentityKey(key) {
+			return true
+		}
+		if wrote {
+			b.WriteByte(',')
+		}
+		b.WriteString(k.Raw)
+		b.WriteByte(':')
+		b.WriteString(v.Raw)
+		wrote = true
+		return true
+	})
+	if !wrote {
+		return "", false
+	}
+	b.WriteByte('}')
+	return b.String(), true
+}
+
+func sanitizeGatewayTurnMetadataValue(value any, ids *codexFingerprintIDs) (any, bool) {
+	raw, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	rebuilt, keep := sanitizeGatewayTurnMetadataHeader(raw, ids)
+	if !keep {
+		return nil, false
+	}
+	return rebuilt, true
+}
+
+func sanitizeGatewayTurnMetadataMap(metadata map[string]any, ids *codexFingerprintIDs) bool {
+	if metadata == nil {
+		return false
+	}
+	changed := false
+	for key, value := range metadata {
+		if isGatewayCodexIdentifierValue(key, value, ids) {
+			continue
+		}
+		// machine 模式：turn 级/行为字段透传（turn_id、sandbox、sandbox_mode、
+		// agent_name、thread_source、compaction、workspaces 等，见 machine chain
+		// 规格 I4「turn 级字段透传」）；身份关联键（session/thread/window/
+		// installation/parent 等）仍只保留网关签发值。
+		if ids != nil && ids.mode == codexFingerprintMachine && !isCodexMachineTurnMetadataIdentityKey(key) {
+			continue
+		}
+		delete(metadata, key)
+		changed = true
+	}
+	return changed
+}
+
+// isCodexMachineTurnMetadataIdentityKey machine turn metadata 中的身份关联键：
+// 这些键的原始值属于客户端真实标识，未签发即删除；其余键按行为字段透传。
+func isCodexMachineTurnMetadataIdentityKey(key string) bool {
+	switch normalizeCodexOutboundKey(key) {
+	case "session_id", "x_codex_session_id",
+		"thread_id", "x_codex_thread_id", "x_client_request_id",
+		"installation_id", "x_codex_installation_id",
+		"window_id", "x_codex_window_id",
+		"conversation_id",
+		"parent_thread_id", "x_codex_parent_thread_id",
+		"forked_from_thread_id", "root_thread_id",
+		"prompt_cache_key":
+		return true
 	default:
 		return false
 	}
@@ -468,6 +719,13 @@ func isGatewayPromptCacheKeyValue(value any) bool {
 // not contain any target key, while failing closed if a suspicious JSON body
 // cannot be decoded for sanitization.
 func sanitizeCodexOutboundJSON(body []byte) ([]byte, bool, error) {
+	return sanitizeCodexOutboundJSONWithFingerprint(body, nil)
+}
+
+func sanitizeCodexOutboundJSONWithFingerprint(
+	body []byte,
+	ids *codexFingerprintIDs,
+) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
@@ -477,15 +735,30 @@ func sanitizeCodexOutboundJSON(body []byte) ([]byte, bool, error) {
 
 	var decoded any
 	if err := json.Unmarshal(body, &decoded); err != nil {
+		slog.Warn(
+			"openai.identifier_sanitization_failed",
+			"surface", "json_body",
+			"error_kind", "invalid_json",
+		)
 		return body, false, fmt.Errorf("decode Codex outbound payload for identifier sanitization: %w", err)
 	}
-	if !sanitizeCodexOutboundMap(decoded) {
+	if !sanitizeCodexOutboundMapValueWithFingerprint(decoded, true, true, ids) {
 		return body, false, nil
 	}
 	sanitized, err := json.Marshal(decoded)
 	if err != nil {
+		slog.Warn(
+			"openai.identifier_sanitization_failed",
+			"surface", "json_body",
+			"error_kind", "encode_json",
+		)
 		return body, false, fmt.Errorf("encode Codex outbound payload after identifier sanitization: %w", err)
 	}
+	slog.Debug(
+		"openai.identifier_sanitized",
+		"surface", "json_body",
+		"changed", true,
+	)
 	return sanitized, true, nil
 }
 

@@ -93,9 +93,25 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 				headers.Add("x-codex-beta-features", value)
 			}
 		}
-		for _, name := range [...]string{"x-codex-window-id", "x-codex-installation-id"} {
+		for _, name := range [...]string{
+			"x-codex-window-id",
+			"x-codex-installation-id",
+			"session-id",
+			"thread-id",
+			"x-client-request-id",
+		} {
 			if value := c.Request.Header.Get(name); strings.TrimSpace(value) != "" {
 				headers.Set(name, value)
+			}
+		}
+		// 子 Agent 身份头（core/src/client.rs X_OPENAI_SUBAGENT_HEADER / X_CODEX_PARENT_THREAD_ID_HEADER）
+		// 仅 machine 模式拷贝（machine 头 sink 会假名化 parent thread），与 HTTP 白名单
+		// openaiCodexSessionIdentityHeaders 的 machine 门控逐键对齐；其他模式维持原有行为。
+		if activeCodexFingerprintMode(account) == codexFingerprintMachine {
+			for _, name := range [...]string{"x-openai-subagent", "x-codex-parent-thread-id"} {
+				if value := c.Request.Header.Get(name); strings.TrimSpace(value) != "" {
+					headers.Set(name, value)
+				}
 			}
 		}
 	}
@@ -105,33 +121,47 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	// 之外：该头是账号/会话级属性，不依赖入站请求是否存在，也避免预热与
 	// 实际请求因头差异落进不同的连接池兼容分桶。
 	applyOpenAICodexBetaFeatures(c, account, headers)
-	// OAuth 账号：将 apiKeyID 混入 session 标识符，防止跨用户会话碰撞。
-	upstreamSessionID := ""
-	upstreamConversationID := ""
-	if shouldBindOpenAIUpstreamSessionAffinity(account) {
+	// Session/conversation identifiers are resolved locally for protocol
+	// bookkeeping. Only the gateway-owned, isolated values are sent upstream.
+	// r3 语义：session/conversation 各自按解析结果独立隔离；sessionResolution 的
+	// pck 兜底锚定的是出站（改写后）prompt_cache_key，与转发 body 保持同一值。
+	// machine 例外：锚定 sink 改写前捕获的本地原始 cache key（假名 1:1 对应的
+	// 原值），保持「同一会话同一假名」的本地会话亲和。
+	var sessionAffinity *openAIGatewaySessionAffinity
+	if shouldUseOpenAIGatewaySessionAffinity(account) {
 		apiKeyID := getAPIKeyIDFromContext(c)
-		if sessionResolution.SessionID != "" {
-			upstreamSessionID = isolateOpenAISessionID(apiKeyID, sessionResolution.SessionID)
-			headers.Set("session_id", upstreamSessionID)
-		}
-		if sessionResolution.ConversationID != "" {
-			upstreamConversationID = isolateOpenAISessionID(apiKeyID, sessionResolution.ConversationID)
-			headers.Set("conversation_id", upstreamConversationID)
-		}
-	} else if account == nil || account.Type != AccountTypeOAuth {
-		if sessionResolution.SessionID != "" {
-			headers.Set("session_id", sessionResolution.SessionID)
-		}
-		if sessionResolution.ConversationID != "" {
-			headers.Set("conversation_id", sessionResolution.ConversationID)
+		if activeCodexFingerprintMode(account) == codexFingerprintMachine {
+			affinitySeed := openAIWSClientPromptCacheKeyFromContext(c)
+			if affinitySeed == "" {
+				affinitySeed = strings.TrimSpace(sessionResolution.SessionID)
+			}
+			if affinitySeed == "" {
+				affinitySeed = strings.TrimSpace(promptCacheKey)
+			}
+			sessionAffinity = deriveOpenAIGatewaySessionAffinity(
+				apiKeyID,
+				affinitySeed,
+				strings.TrimSpace(sessionResolution.ConversationID) != "",
+			)
+		} else {
+			sessionAffinity = deriveOpenAIGatewaySessionAffinityWithIndependentSeeds(
+				apiKeyID,
+				sessionResolution.SessionID,
+				sessionResolution.ConversationID,
+			)
 		}
 	}
+	applyOpenAIGatewaySessionAffinityHeaders(headers, sessionAffinity)
 	if state := strings.TrimSpace(turnState); state != "" {
 		headers.Set(openAIWSTurnStateHeader, state)
 	}
 	if metadata := strings.TrimSpace(turnMetadata); metadata != "" {
 		headers.Set(openAIWSTurnMetadataHeader, metadata)
 	}
+	// 指纹收敛：出站握手头改写（session-id/thread-id/x-client-request-id/子 Agent
+	// 头等）。staged IDs 由 ingress 的 stageCodexMachineFingerprintIDsForWSIngress
+	// 暂存；非 machine 模式读到 nil ⇒ 原样返回，不影响存量行为。
+	applyStagedCodexFingerprintHeaders(c, account, headers)
 
 	if account != nil && account.Type == AccountTypeOAuth {
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, headers, account); err != nil {
@@ -176,10 +206,12 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	if strings.TrimSpace(turnState) != "" {
 		headers.Set(openAIWSTurnStateHeader, turnState)
 	}
-	sanitizeCodexOutboundHeadersWithSessionAffinity(
+	// 终态 sanitizer：machine 暂存的假名值属于网关产物会被保留；亲和头以
+	// 等值方式保留；其余 Codex 标识符一律剥离。
+	sanitizeCodexOutboundHeadersWithFingerprintAndAffinity(
 		headers,
-		upstreamSessionID,
-		upstreamConversationID,
+		stagedCodexFingerprintIDsForAccount(c, account),
+		sessionAffinity,
 	)
 	logOpenAIRoutingDiagnostics(
 		ctx,
