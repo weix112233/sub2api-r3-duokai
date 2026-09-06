@@ -26,46 +26,16 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
 }
 
-func TestAccountRepository_ClearOpenAIRateLimitIfObservedUsesAtomicOutbox(t *testing.T) {
-	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
-	repo := newAccountRepositoryWithSQL(nil, exec, nil)
-	limitedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Microsecond)
-	resetAt := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-
-	cleared, err := repo.ClearOpenAIRateLimitIfObserved(context.Background(), 42, limitedAt, resetAt)
-
-	require.NoError(t, err)
-	require.True(t, cleared)
-	require.Len(t, exec.execQueries, 1)
-	normalized := normalizeSQLWhitespace(exec.execQueries[0])
-	require.Contains(t, normalized, "WITH updated AS")
-	require.Contains(t, normalized, "UPDATE accounts AS a")
-	require.Contains(t, normalized, "a.rate_limited_at = $4")
-	require.Contains(t, normalized, "a.rate_limit_reset_at = $5")
-	require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
-	require.Contains(t, normalized, "FROM updated")
-	require.Len(t, exec.execArgs[0], 6)
-	require.Equal(t, int64(42), exec.execArgs[0][0])
-	require.Equal(t, service.PlatformOpenAI, exec.execArgs[0][1])
-	require.Equal(t, service.AccountTypeOAuth, exec.execArgs[0][2])
-	require.Equal(t, service.SchedulerOutboxEventAccountChanged, exec.execArgs[0][5])
-}
-
-func TestAccountRepository_ClearOpenAIRateLimitIfObserved_NoRowsDoesNotWriteOutbox(t *testing.T) {
+func TestAccountRepository_ResetQuotaUsedAndClearRateLimitCooldown_NoRowsAffectedReturnsNotFoundWithoutOutbox(t *testing.T) {
 	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
 	repo := newAccountRepositoryWithSQL(nil, exec, nil)
 
-	cleared, err := repo.ClearOpenAIRateLimitIfObserved(
-		context.Background(),
-		42,
-		time.Now().Add(-time.Minute),
-		time.Now().Add(time.Hour),
-	)
+	err := repo.ResetQuotaUsedAndClearRateLimitCooldown(context.Background(), 42)
 
-	require.NoError(t, err)
-	require.False(t, cleared)
+	require.ErrorIs(t, err, service.ErrAccountNotFound)
 	require.Len(t, exec.execQueries, 1)
-	require.Contains(t, normalizeSQLWhitespace(exec.execQueries[0]), "INSERT INTO scheduler_outbox")
+	require.Contains(t, exec.execQueries[0], "UPDATE accounts")
+	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
 }
 
 func TestAccountRepository_GrokCredentialConditionalMutationsAreEligibleAndAtomicallyPropagated(t *testing.T) {

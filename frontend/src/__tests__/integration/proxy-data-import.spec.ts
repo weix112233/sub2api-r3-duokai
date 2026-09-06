@@ -46,6 +46,22 @@ describe('Proxy ImportDataModal', () => {
     expect(showError).toHaveBeenCalledWith('admin.proxies.dataImportSelectFile')
   })
 
+  it('选择文件控件由真实文件输入直接承接点击', () => {
+    const wrapper = mount(ImportDataModal, {
+      props: { show: true },
+      global: {
+        stubs: {
+          BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }
+        }
+      }
+    })
+    const input = wrapper.get('input[type="file"]')
+
+    expect(input.classes()).not.toContain('hidden')
+    expect(input.classes()).toContain('opacity-0')
+    expect(input.attributes('aria-label')).toBe('common.chooseFile')
+  })
+
   it('无效 JSON 时提示解析失败', async () => {
     const wrapper = mount(ImportDataModal, {
       props: { show: true },

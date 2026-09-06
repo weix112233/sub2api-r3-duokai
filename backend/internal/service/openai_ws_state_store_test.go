@@ -28,35 +28,25 @@ func TestOpenAIWSStateStore_BindGetDeleteResponseAccount(t *testing.T) {
 	require.Zero(t, accountID)
 }
 
-func TestOpenAIWSStateStore_ResponsePromptCacheKeyIsAccountAndGroupScoped(t *testing.T) {
-	store := NewOpenAIWSStateStore(nil)
-	groupID := int64(7)
-	accountID := int64(101)
-	key := deriveOpenAIOutboundPromptCacheKeyFromClientKey("state-store-a", "gpt-5.6-sol")
+func TestOpenAIWSStateStore_HTTPResponseOwnerPersistsAcrossStoreInstances(t *testing.T) {
+	cache := &stubGatewayCache{}
+	ctx := context.Background()
+	groupID := int64(8)
+	writer := NewOpenAIWSStateStore(cache)
 
-	store.BindResponsePromptCacheKey(groupID, accountID, "resp_cache", key, time.Minute)
+	require.NoError(t, writer.BindHTTPResponseOwner(ctx, groupID, "resp_owned", 201, 301, time.Minute))
+	userID, apiKeyID, found, err := writer.GetHTTPResponseOwner(ctx, groupID, "resp_owned")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, int64(201), userID)
+	require.Equal(t, int64(301), apiKeyID)
 
-	got, ok := store.GetResponsePromptCacheKey(groupID, accountID, "resp_cache")
-	require.True(t, ok)
-	require.Equal(t, key, got)
-
-	_, ok = store.GetResponsePromptCacheKey(groupID+1, accountID, "resp_cache")
-	require.False(t, ok)
-	_, ok = store.GetResponsePromptCacheKey(groupID, accountID+1, "resp_cache")
-	require.False(t, ok)
-
-	store.DeleteResponsePromptCacheKey(groupID, "resp_cache")
-	_, ok = store.GetResponsePromptCacheKey(groupID, accountID, "resp_cache")
-	require.False(t, ok)
-}
-
-func TestOpenAIWSStateStore_ResponsePromptCacheKeyExpires(t *testing.T) {
-	store := NewOpenAIWSStateStore(nil)
-	store.BindResponsePromptCacheKey(7, 101, "resp_cache_ttl", deriveOpenAIOutboundPromptCacheKeyFromClientKey("state-store-b", "gpt-5.6-sol"), 30*time.Millisecond)
-
-	time.Sleep(60 * time.Millisecond)
-	_, ok := store.GetResponsePromptCacheKey(7, 101, "resp_cache_ttl")
-	require.False(t, ok)
+	reader := NewOpenAIWSStateStore(cache)
+	userID, apiKeyID, found, err = reader.GetHTTPResponseOwner(ctx, groupID, "resp_owned")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, int64(201), userID)
+	require.Equal(t, int64(301), apiKeyID)
 }
 
 func TestOpenAIWSStateStore_ResponseConnTTL(t *testing.T) {
@@ -74,22 +64,18 @@ func TestOpenAIWSStateStore_ResponseConnTTL(t *testing.T) {
 
 func TestOpenAIWSStateStore_SessionTurnStateTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
-	store.BindSessionTurnState(9, 41, "session_hash_1", "turn_state_1", 30*time.Millisecond)
+	store.BindSessionTurnState(9, "session_hash_1", "turn_state_1", 30*time.Millisecond)
 
-	state, ok := store.GetSessionTurnState(9, 41, "session_hash_1")
+	state, ok := store.GetSessionTurnState(9, "session_hash_1")
 	require.True(t, ok)
 	require.Equal(t, "turn_state_1", state)
 
 	// group 隔离
-	_, ok = store.GetSessionTurnState(10, 41, "session_hash_1")
-	require.False(t, ok)
-
-	// account 隔离
-	_, ok = store.GetSessionTurnState(9, 42, "session_hash_1")
+	_, ok = store.GetSessionTurnState(10, "session_hash_1")
 	require.False(t, ok)
 
 	time.Sleep(60 * time.Millisecond)
-	_, ok = store.GetSessionTurnState(9, 41, "session_hash_1")
+	_, ok = store.GetSessionTurnState(9, "session_hash_1")
 	require.False(t, ok)
 }
 
@@ -249,6 +235,13 @@ func (c *openAIWSStateStoreTimeoutProbeCache) ClaimGrokVideoBilled(_ context.Con
 
 func (c *openAIWSStateStoreTimeoutProbeCache) ReleaseGrokVideoBilled(_ context.Context, _ string) error {
 	return nil
+}
+
+func (c *openAIWSStateStoreTimeoutProbeCache) SetReasoningContent(_ context.Context, _ string, _ string, _ time.Duration) error {
+	return nil
+}
+func (c *openAIWSStateStoreTimeoutProbeCache) GetReasoningContent(_ context.Context, _ string) (string, error) {
+	return "", ErrReasoningContentNotFound
 }
 
 func TestOpenAIWSStateStore_RedisOpsUseShortTimeout(t *testing.T) {

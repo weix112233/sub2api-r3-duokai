@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -24,10 +25,10 @@ const openAITransportErrorTempUnschedDuration = 10 * time.Minute
 // ultimately exhausted.
 var openAITransportFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"Upstream request failed"}}`)
 
-// openAITransportErrorClass describes how to react to a transport-level upstream
+// upstreamTransportErrorClass describes how to react to a transport-level upstream
 // failure — i.e. the HTTP round-trip never completed (proxy / DNS / TCP / TLS
 // error, no HTTP status code received).
-type openAITransportErrorClass struct {
+type upstreamTransportErrorClass struct {
 	// Persistent marks failures where retrying the same proxy/account is
 	// pointless: expired or rejected proxy credentials, a dead proxy endpoint,
 	// or DNS/routing failure. Such accounts should be temporarily unscheduled
@@ -35,12 +36,12 @@ type openAITransportErrorClass struct {
 	Persistent bool
 }
 
-// openAIPersistentTransportErrorMarkers are substrings (matched case-insensitively
+// persistentUpstreamTransportErrorMarkers are substrings (matched case-insensitively
 // against the raw transport error) that indicate a durable proxy/network fault.
 // Matched signals are intentionally specific failure *reasons*, not the operation
 // (e.g. we match "connection refused", not "proxyconnect") so that a transient
 // failure of the same operation (a proxy timeout) is NOT misclassified as durable.
-var openAIPersistentTransportErrorMarkers = []string{
+var persistentUpstreamTransportErrorMarkers = []string{
 	"authentication failed",         // SOCKS5 RFC1929 / proxy credentials rejected (expired account)
 	"proxy authentication required", // HTTP proxy 407
 	"connection refused",            // proxy/upstream endpoint down
@@ -49,7 +50,34 @@ var openAIPersistentTransportErrorMarkers = []string{
 	"no such host", // DNS resolution failure (bad/expired proxy hostname)
 }
 
-// classifyOpenAITransportError decides whether a transport-level upstream error
+// isOpenAIProxyChainTransportError identifies an HTTP proxy CONNECT failure
+// where the local proxy chain returned an HTTP gateway status before the
+// upstream request was established. net/http exposes this as an error rather
+// than an *http.Response, so the response-header marker handled by the normal
+// HTTP path is unavailable here.
+func isOpenAIProxyChainTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var connectErr *proxyutil.ConnectError
+	if errors.As(err, &connectErr) {
+		switch connectErr.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "proxyconnect") && !strings.Contains(msg, "proxy connect failed:") {
+		return false
+	}
+	return strings.Contains(msg, "502 bad gateway") ||
+		strings.Contains(msg, "503 service unavailable") ||
+		strings.Contains(msg, "504 gateway timeout")
+}
+
+// classifyUpstreamTransportError decides whether a transport-level upstream error
 // is durable (Persistent — evict the account + alert) or a transient blip
 // (fail over to a healthy account but keep this one schedulable).
 //
@@ -65,30 +93,33 @@ var openAIPersistentTransportErrorMarkers = []string{
 //     The network-layer string markers ("connection refused", "no route to host",
 //     "network is unreachable", "no such host") are kept as a cross-platform safety
 //     net even though the typed checks should cover them on modern Go+Linux.
-func classifyOpenAITransportError(err error) openAITransportErrorClass {
+func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 	if err == nil {
-		return openAITransportErrorClass{}
+		return upstreamTransportErrorClass{}
+	}
+	if isOpenAIProxyChainTransportError(err) {
+		return upstreamTransportErrorClass{Persistent: true}
 	}
 
 	// — Typed checks (preferred) ——————————————————————————————————————————————
 	if errors.Is(err, syscall.ECONNREFUSED) ||
 		errors.Is(err, syscall.EHOSTUNREACH) ||
 		errors.Is(err, syscall.ENETUNREACH) {
-		return openAITransportErrorClass{Persistent: true}
+		return upstreamTransportErrorClass{Persistent: true}
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-		return openAITransportErrorClass{Persistent: true}
+		return upstreamTransportErrorClass{Persistent: true}
 	}
 
 	// — String-marker fallback ————————————————————————————————————————————————
 	msg := strings.ToLower(err.Error())
-	for _, marker := range openAIPersistentTransportErrorMarkers {
+	for _, marker := range persistentUpstreamTransportErrorMarkers {
 		if strings.Contains(msg, marker) {
-			return openAITransportErrorClass{Persistent: true}
+			return upstreamTransportErrorClass{Persistent: true}
 		}
 	}
-	return openAITransportErrorClass{}
+	return upstreamTransportErrorClass{}
 }
 
 // handleOpenAIUpstreamTransportError handles a transport-level upstream failure
@@ -120,7 +151,7 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 
 	// Client disconnected: do NOT fail over to another account and do NOT evict
 	// this one — the upstream never had a chance to exhibit a fault.
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || (errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 		return err
 	}
 
@@ -129,7 +160,24 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		scheduleOllamaCloudUsageActivity(s.deferredService, account)
 	}
 
-	if classifyOpenAITransportError(err).Persistent {
+	// 插件已把请求交给上游时，自动切换账号可能造成重复扣费或重复执行。
+	var pluginErr *PluginTransportError
+	if errors.As(err, &pluginErr) && pluginErr.RequestSent {
+		return err
+	}
+
+	if isOpenAIProxyChainTransportError(err) {
+		// The proxy chain is a shared transport boundary. A CONNECT gateway
+		// failure cannot be repaired by trying another account through the same
+		// chain, so stop this request's failover loop and return the same
+		// retryable 503 used by the response-header path.
+		s.recordOpenAIProxyChainFailure(account, err, "")
+		return newOpenAIProxyChainFailoverError(http.StatusBadGateway, http.Header{
+			"Retry-After": []string{"5"},
+		})
+	}
+
+	if classifyUpstreamTransportError(err).Persistent {
 		s.tempUnscheduleOpenAITransportError(ctx, account, safeErr)
 	}
 

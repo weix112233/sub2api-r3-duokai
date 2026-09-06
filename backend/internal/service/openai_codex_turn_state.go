@@ -115,9 +115,10 @@ func (s *OpenAIGatewayService) noteOpenAICodexTurnStateProvenance(c *gin.Context
 	s.sweepOpenAICodexTurnStateOrigins()
 }
 
-// guardOpenAICodexTurnStateEcho 出站守卫：只允许本服务记录为当前账号铸造
-// 的 turn-state 回带。客户端自带、未知来源、已过期或其他账号铸造的值全部
-// 剥离；服务端注入由 WS state store 或兼容桥在守卫之后单独完成。
+// guardOpenAICodexTurnStateEcho 出站守卫：客户端回带的 turn-state 若已知由
+// 其他账号铸造则剥离，同账号或无溯源记录时保持原样。只剥离、不注入——
+// /responses 路径的客户端是真实 Codex，会按自身回合语义自行回带；服务端
+// 注入是 Claude 兼容桥（无法回带的客户端）的专属行为。
 func (s *OpenAIGatewayService) guardOpenAICodexTurnStateEcho(c *gin.Context, account *Account, h http.Header) {
 	if s == nil || h == nil || account == nil {
 		return
@@ -127,23 +128,19 @@ func (s *OpenAIGatewayService) guardOpenAICodexTurnStateEcho(c *gin.Context, acc
 	}
 	seed := openAICodexTurnStateSeed(c)
 	if seed == "" {
-		h.Del(openAICodexTurnStateHeader)
 		return
 	}
 	raw, ok := s.openaiCodexTurnStateOrigins.Load(seed)
 	if !ok {
-		h.Del(openAICodexTurnStateHeader)
 		return
 	}
 	origin, ok := raw.(openAICodexTurnStateOrigin)
 	if !ok {
 		s.openaiCodexTurnStateOrigins.Delete(seed)
-		h.Del(openAICodexTurnStateHeader)
 		return
 	}
 	if !origin.expiresAt.IsZero() && time.Now().After(origin.expiresAt) {
 		s.openaiCodexTurnStateOrigins.Delete(seed)
-		h.Del(openAICodexTurnStateHeader)
 		return
 	}
 	if origin.accountID != account.ID {

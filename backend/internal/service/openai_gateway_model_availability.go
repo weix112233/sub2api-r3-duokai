@@ -33,15 +33,19 @@ func (s *OpenAIGatewayService) DiagnoseModelAvailabilityForPlatform(
 	if s.accountRepo == nil {
 		return ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: true}
 	}
+	candidateRepo, ok := s.accountRepo.(ModelAvailabilityCandidateRepository)
+	if !ok {
+		return ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: true}
+	}
 
-	platform = normalizeOpenAICompatiblePlatform(platform)
+	platform = NormalizeOpenAICompatiblePlatform(platform)
 	queryGroupID := groupID
 	includeGrouped := false
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
 		queryGroupID = nil
 		includeGrouped = true
 	}
-	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(
+	accounts, err := candidateRepo.ListModelAvailabilityCandidates(
 		ctx,
 		queryGroupID,
 		[]string{platform},

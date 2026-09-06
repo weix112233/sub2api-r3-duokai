@@ -120,7 +120,7 @@ func (s *OpenAIGatewayService) openAIStickyLegacyTTL(ttl time.Duration) time.Dur
 }
 
 func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) (int64, error) {
-	if s == nil || s.cache == nil || groupID == nil {
+	if s == nil || s.cache == nil {
 		return 0, nil
 	}
 
@@ -152,7 +152,7 @@ func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, gr
 }
 
 func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string, accountID int64, ttl time.Duration) error {
-	if s == nil || s.cache == nil || groupID == nil || accountID <= 0 {
+	if s == nil || s.cache == nil || accountID <= 0 {
 		return nil
 	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)
@@ -179,7 +179,7 @@ func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, gr
 }
 
 func (s *OpenAIGatewayService) refreshStickySessionTTL(ctx context.Context, groupID *int64, sessionHash string, ttl time.Duration) error {
-	if s == nil || s.cache == nil || groupID == nil {
+	if s == nil || s.cache == nil {
 		return nil
 	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)
@@ -200,7 +200,7 @@ func (s *OpenAIGatewayService) refreshStickySessionTTL(ctx context.Context, grou
 }
 
 func (s *OpenAIGatewayService) deleteStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) error {
-	if s == nil || s.cache == nil || groupID == nil {
+	if s == nil || s.cache == nil {
 		return nil
 	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)

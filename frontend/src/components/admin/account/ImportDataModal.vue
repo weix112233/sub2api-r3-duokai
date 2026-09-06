@@ -37,18 +37,21 @@
               <span v-if="files.length > 1"> · {{ fileListTitle }}</span>
             </div>
           </div>
-          <button type="button" class="btn btn-secondary shrink-0" @click="openFilePicker">
-            {{ t('common.chooseFile') }}
-          </button>
+          <label
+            class="btn btn-secondary relative shrink-0 cursor-pointer overflow-hidden focus-within:ring-2 focus-within:ring-primary-500 focus-within:ring-offset-2 dark:focus-within:ring-offset-dark-900"
+          >
+            <span>{{ t('common.chooseFile') }}</span>
+            <input
+              ref="fileInput"
+              type="file"
+              class="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              accept="application/json,.json"
+              multiple
+              :aria-label="t('common.chooseFile')"
+              @change="handleFileChange"
+            />
+          </label>
         </div>
-        <input
-          ref="fileInput"
-          type="file"
-          class="hidden"
-          accept="application/json,.json"
-          multiple
-          @change="handleFileChange"
-        />
       </div>
 
       <div
@@ -149,10 +152,6 @@ watch(
     }
   }
 )
-
-const openFilePicker = () => {
-  fileInput.value?.click()
-}
 
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement

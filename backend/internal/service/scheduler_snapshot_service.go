@@ -31,8 +31,6 @@ const (
 	outboxRebuildRetryBaseDelay           = 5 * time.Second
 	outboxRebuildRetryMaxDelay            = 5 * time.Minute
 	outboxMaxIDErrorLogSampleInterval     = time.Minute
-	schedulerTimeSensitiveRefreshInterval = 15 * time.Second
-	schedulerTimeSensitiveRefreshTimeout  = 5 * time.Second
 )
 
 // batchSeenKey tracks completed per-platform rebuilds and group lifecycle work
@@ -145,9 +143,6 @@ type SchedulerSnapshotService struct {
 	fullRebuildRequested uint64
 	fullRebuildCompleted uint64
 	fullRebuildLastErr   error
-
-	timeSensitiveRefreshMu sync.Mutex
-	timeSensitiveRefreshAt map[SchedulerBucket]time.Time
 }
 
 func NewSchedulerSnapshotService(
@@ -162,14 +157,13 @@ func NewSchedulerSnapshotService(
 		maxQPS = cfg.Gateway.Scheduling.DbFallbackMaxQPS
 	}
 	return &SchedulerSnapshotService{
-		cache:                  cache,
-		outboxRepo:             outboxRepo,
-		accountRepo:            accountRepo,
-		groupRepo:              groupRepo,
-		cfg:                    cfg,
-		stopCh:                 make(chan struct{}),
-		fallbackLimit:          newFallbackLimiter(maxQPS),
-		timeSensitiveRefreshAt: make(map[SchedulerBucket]time.Time),
+		cache:         cache,
+		outboxRepo:    outboxRepo,
+		accountRepo:   accountRepo,
+		groupRepo:     groupRepo,
+		cfg:           cfg,
+		stopCh:        make(chan struct{}),
+		fallbackLimit: newFallbackLimiter(maxQPS),
 	}
 }
 
@@ -231,10 +225,6 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 		if err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
 		} else if hit {
-			// Time-bounded scheduling fields can become eligible without an
-			// outbox event. Keep the hot path on the current snapshot while a
-			// bounded, deduplicated background refresh repairs membership.
-			s.scheduleTimeSensitiveBucketRefresh(bucket, useMixed)
 			return derefAccounts(cached), useMixed, nil
 		}
 		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
@@ -279,52 +269,6 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 	}
 
 	return accounts, useMixed, nil
-}
-
-func (s *SchedulerSnapshotService) scheduleTimeSensitiveBucketRefresh(bucket SchedulerBucket, useMixed bool) {
-	if s == nil || s.cache == nil || s.accountRepo == nil ||
-		useMixed || (bucket.Platform != PlatformOpenAI && bucket.Platform != PlatformGrok) ||
-		(bucket.Mode != SchedulerModeSingle && bucket.Mode != SchedulerModeForced) {
-		return
-	}
-
-	now := time.Now()
-	s.timeSensitiveRefreshMu.Lock()
-	if s.timeSensitiveRefreshAt == nil {
-		s.timeSensitiveRefreshAt = make(map[SchedulerBucket]time.Time)
-	}
-	last, ok := s.timeSensitiveRefreshAt[bucket]
-	if ok && now.Sub(last) < schedulerTimeSensitiveRefreshInterval {
-		s.timeSensitiveRefreshMu.Unlock()
-		return
-	}
-	s.timeSensitiveRefreshAt[bucket] = now
-	s.timeSensitiveRefreshMu.Unlock()
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), schedulerTimeSensitiveRefreshTimeout)
-		defer cancel()
-
-		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
-		if err != nil {
-			return
-		}
-		accounts, err := s.loadAccountsFromDB(ctx, bucket, false)
-		if err != nil {
-			return
-		}
-		if err := s.cache.SetSnapshot(ctx, bucket, token, accounts); err != nil {
-			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
-				return
-			}
-			logger.LegacyPrintf(
-				"service.scheduler_snapshot",
-				"[Scheduler] time-sensitive bucket refresh failed: bucket=%s err=%v",
-				bucket.String(),
-				err,
-			)
-		}
-	}()
 }
 
 func (s *SchedulerSnapshotService) GetAccount(ctx context.Context, accountID int64) (*Account, error) {
@@ -643,7 +587,7 @@ func (s *SchedulerSnapshotService) handleBulkAccountEvent(ctx context.Context, p
 		rebuildGroupIDs = append(rebuildGroupIDs, gid)
 	}
 
-	// 缺失账户无法确定原平台，保留五平台重建以避免遗留旧快照。
+	// 缺失账户无法确定原平台，保留全平台重建以避免遗留旧快照。
 	if !allAccountsFound {
 		return s.rebuildByGroupIDs(ctx, rebuildGroupIDs, "account_bulk_change", seen)
 	}
@@ -665,7 +609,7 @@ func (s *SchedulerSnapshotService) handleBulkAccountEvent(ctx context.Context, p
 		}
 		accountGroupIDs := s.normalizeGroupIDs(account.GroupIDs)
 		switch account.Platform {
-		case PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformGrok:
+		case PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek:
 			addPlatformGroups(account.Platform, accountGroupIDs)
 		case PlatformAntigravity:
 			// 批量更新可能刚关闭 mixed_scheduling，仍需清理两个兼容平台的旧快照。
@@ -880,8 +824,8 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 	return s.rebuildBuckets(ctx, buckets, reason)
 }
 
-func schedulerSnapshotPlatforms() [5]string {
-	return [5]string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok}
+func schedulerSnapshotPlatforms() [8]string {
+	return [8]string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek}
 }
 
 // 生命周期辅助函数有意排除 group0；full rebuild 构造 group0 canonical 集时必须显式调用 canonical helper。
@@ -893,7 +837,7 @@ func schedulerBucketsForGroup(groupID int64) []SchedulerBucket {
 }
 
 func schedulerCanonicalBuckets(groupID int64) []SchedulerBucket {
-	buckets := make([]SchedulerBucket, 0, 12)
+	buckets := make([]SchedulerBucket, 0, 18)
 	for _, platform := range schedulerSnapshotPlatforms() {
 		buckets = append(buckets,
 			SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeSingle},
@@ -911,7 +855,7 @@ func (s *SchedulerSnapshotService) rebuildByGroupIDs(ctx context.Context, groupI
 	if len(groupIDs) == 0 {
 		return nil
 	}
-	buckets := make([]SchedulerBucket, 0, len(groupIDs)*12)
+	buckets := make([]SchedulerBucket, 0, len(groupIDs)*18)
 	for _, platform := range schedulerSnapshotPlatforms() {
 		buckets = append(buckets, s.bucketsForPlatform(platform, groupIDs, seen)...)
 	}

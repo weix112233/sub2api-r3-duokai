@@ -64,10 +64,9 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 }
 
 var schedulerNeutralExtraKeys = map[string]struct{}{
-	"codex_usage_updated_at":            {},
-	"codex_provider_probe_succeeded_at": {},
-	"grok_billing_snapshot":             {},
-	"session_window_utilization":        {},
+	"codex_usage_updated_at":     {},
+	"grok_billing_snapshot":      {},
+	"session_window_utilization": {},
 }
 
 const postgresParameterBatchSize = 50000
@@ -138,6 +137,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		return service.ErrAccountNilInput
 	}
 	service.NormalizeOpenAICodexFingerprintExtraForCreate(account)
+	service.NormalizeTLSFingerprintExtraForCreate(account)
 
 	builder := client.Account.Create().
 		SetName(account.Name).
@@ -628,8 +628,8 @@ func lockAndMergeAccountProbeExtra(
 			AND credentials = $4::jsonb
 			AND proxy_id IS NOT DISTINCT FROM $5,
 			COALESCE(
-				platform IN ('openai', 'anthropic')
-				AND $2 IN ('openai', 'anthropic')
+				platform IN (`+ollamaCloudUsagePlatformsSQL+`)
+				AND $2 IN (`+ollamaCloudUsagePlatformsSQL+`)
 				AND type = 'apikey'
 				AND $3 = 'apikey'
 				AND credentials -> 'api_key' IS NOT DISTINCT FROM $4::jsonb -> 'api_key'
@@ -816,7 +816,7 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 			extra = CASE
 				-- 凭证整体未变化 ⇒ Ollama 组身份必然未变化；顶层 DISTINCT 守卫防止
 				-- 非 Ollama 账号的无变化持久化误清探测快照或重写 NULL extra。
-				WHEN platform IN ('openai', 'anthropic')
+				WHEN platform IN (`+ollamaCloudUsagePlatformsSQL+`)
 					AND type = 'apikey'
 					AND credentials IS DISTINCT FROM $1::jsonb
 					AND (
@@ -2173,63 +2173,6 @@ func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetA
 	return nil
 }
 
-// ListRateLimitedOpenAIOAuth returns active, schedulable OpenAI OAuth accounts
-// with an account-level runtime rate-limit generation. The revalidator uses
-// this bounded surface to ask the provider whether a future local reset was
-// superseded by an earlier provider reset.
-func (r *accountRepository) ListRateLimitedOpenAIOAuth(ctx context.Context) ([]service.Account, error) {
-	accounts, err := r.client.Account.Query().
-		Where(
-			dbaccount.PlatformEQ(service.PlatformOpenAI),
-			dbaccount.TypeEQ(service.AccountTypeOAuth),
-			dbaccount.StatusEQ(service.StatusActive),
-			dbaccount.SchedulableEQ(true),
-			dbaccount.RateLimitedAtNotNil(),
-			dbaccount.RateLimitResetAtNotNil(),
-			dbaccount.DeletedAtIsNil(),
-		).
-		Order(dbent.Asc(dbaccount.FieldPriority), dbent.Asc(dbaccount.FieldID)).
-		All(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.accountsToService(ctx, accounts)
-}
-
-// ListOpenAIRateLimitRevalidationCandidates returns active, schedulable
-// OpenAI OAuth accounts that either have an account-level rate-limit
-// generation or carry the explicit 7-day quota snapshot used by the scheduler
-// hard pause. The service layer validates the snapshot before probing, so this
-// query never clears state by itself.
-func (r *accountRepository) ListOpenAIRateLimitRevalidationCandidates(ctx context.Context) ([]service.Account, error) {
-	accounts, err := r.client.Account.Query().
-		Where(
-			dbaccount.PlatformEQ(service.PlatformOpenAI),
-			dbaccount.TypeEQ(service.AccountTypeOAuth),
-			dbaccount.StatusEQ(service.StatusActive),
-			dbaccount.SchedulableEQ(true),
-			dbaccount.DeletedAtIsNil(),
-			dbaccount.Or(
-				dbaccount.And(
-					dbaccount.RateLimitedAtNotNil(),
-					dbaccount.RateLimitResetAtNotNil(),
-				),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					s.Where(entsql.Or(
-						sqljson.HasKey(dbaccount.FieldExtra, sqljson.Path("codex_7d_used_percent")),
-						sqljson.HasKey(dbaccount.FieldExtra, sqljson.Path("codex_7d_reset_at")),
-					))
-				}),
-			),
-		).
-		Order(dbent.Asc(dbaccount.FieldPriority), dbent.Asc(dbaccount.FieldID)).
-		All(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.accountsToService(ctx, accounts)
-}
-
 // SetRateLimitedIfLater atomically extends an account-level rate limit. Grok
 // requests may finish concurrently, so an older response must not overwrite a
 // later reset boundary observed by another request or instance.
@@ -2288,52 +2231,6 @@ func (r *accountRepository) ClearRateLimitIfObserved(ctx context.Context, id int
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue observed rate-limit clear failed: account=%d err=%v", id, err)
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
-	return true, nil
-}
-
-// ClearOpenAIRateLimitIfObserved clears exactly the OpenAI OAuth rate-limit
-// generation that a successful provider probe observed before it ran.
-// Matching both timestamps prevents a stale probe from erasing a newer 429.
-func (r *accountRepository) ClearOpenAIRateLimitIfObserved(ctx context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error) {
-	if r == nil || r.sql == nil {
-		return false, errors.New("account repository SQL executor is not configured")
-	}
-	result, err := r.sql.ExecContext(ctx, `
-		WITH updated AS (
-		UPDATE accounts AS a
-		SET rate_limited_at = NULL,
-			rate_limit_reset_at = NULL,
-			updated_at = NOW()
-		WHERE a.id = $1
-			AND a.deleted_at IS NULL
-			AND a.platform = $2
-			AND a.type = $3
-			AND a.rate_limited_at = $4
-			AND a.rate_limit_reset_at = $5
-		RETURNING a.id
-		)
-		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
-		SELECT $6, updated.id, NULL, NULL FROM updated
-	`,
-		id,
-		service.PlatformOpenAI,
-		service.AccountTypeOAuth,
-		observedLimitedAt,
-		observedResetAt,
-		service.SchedulerOutboxEventAccountChanged,
-	)
-	if err != nil {
-		return false, err
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if updated == 0 {
-		r.syncSchedulerAccountSnapshotDetached(ctx, id)
-		return false, nil
-	}
-	r.syncSchedulerAccountSnapshotDetached(ctx, id)
 	return true, nil
 }
 
@@ -3040,7 +2937,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 				extraExpression = "(" + extraExpression + ") - 'ollama_cloud_usage_snapshot'"
 			}
 		}
-		eligibleAccount := "platform IN ('openai', 'anthropic') AND type = 'apikey'"
+		eligibleAccount := "platform IN (" + ollamaCloudUsagePlatformsSQL + ") AND type = 'apikey'"
 		groupIdentityChanged := ""
 		if len(ollamaGroupIdentityChanges) > 0 {
 			groupIdentityChanged = "(" + eligibleAccount + " AND (" + joinClauses(ollamaGroupIdentityChanges, " OR ") + "))"
@@ -3868,23 +3765,32 @@ func (r *accountRepository) IncrementQuotaUsed(ctx context.Context, id int64, am
 	return nil
 }
 
-// ResetQuotaUsed 重置账号所有维度的配额用量为 0
-// 保留固定重置模式的配置字段（quota_daily_reset_mode 等），仅清零用量和窗口起始时间
-func (r *accountRepository) ResetQuotaUsed(ctx context.Context, id int64) error {
-	_, err := r.sql.ExecContext(ctx,
+// ResetQuotaUsedAndClearRateLimitCooldown resets all quota dimensions and the
+// account-level cooldown in one statement. Other scheduler blocking state is preserved.
+func (r *accountRepository) ResetQuotaUsedAndClearRateLimitCooldown(ctx context.Context, id int64) error {
+	result, err := r.sql.ExecContext(ctx,
 		`UPDATE accounts SET extra = (
 			COALESCE(extra, '{}'::jsonb)
 			|| '{"quota_used": 0, "quota_daily_used": 0, "quota_weekly_used": 0}'::jsonb
-		) - 'quota_daily_start' - 'quota_weekly_start' - 'quota_daily_reset_at' - 'quota_weekly_reset_at', updated_at = NOW()
+		) - 'quota_daily_start' - 'quota_weekly_start' - 'quota_daily_reset_at' - 'quota_weekly_reset_at',
+		rate_limited_at = NULL, rate_limit_reset_at = NULL, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`,
 		id)
 	if err != nil {
 		return err
 	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
+	}
 	// 重置配额后触发调度快照刷新，使账号重新参与调度
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue quota reset failed: account=%d err=%v", id, err)
 	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
 	return nil
 }
 

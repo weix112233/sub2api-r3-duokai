@@ -10,7 +10,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func TestOpenAIGatewayService_APIKeyPassthrough_ImageIntentPreservesGateAndBilling(t *testing.T) {
@@ -51,12 +50,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_ImageIntentPreservesGateAndBilli
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, upstream.lastReq)
-		bodyWithoutCacheKey, deleteErr := sjson.DeleteBytes(upstream.lastBody, "prompt_cache_key")
-		require.NoError(t, deleteErr)
-		require.JSONEq(t, string(body), string(bodyWithoutCacheKey))
-		promptCacheKey := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
-		require.Regexp(t, `^pcv2-[A-Za-z0-9_-]{43}$`, promptCacheKey)
-		require.LessOrEqual(t, len(promptCacheKey), openAIOutboundPromptCacheKeyMaxLength)
+		require.Equal(t, body, upstream.lastBody)
 		require.Equal(t, 1, result.ImageCount)
 		require.Equal(t, "gpt-image-2", result.BillingModel)
 		require.Equal(t, "2K", result.ImageSize)

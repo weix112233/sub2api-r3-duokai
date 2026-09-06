@@ -66,9 +66,12 @@ func TestGetCodexFingerprintMode(t *testing.T) {
 		{"非 OAuth 账号", &Account{Platform: PlatformOpenAI, Type: "api_key"}, codexFingerprintOff},
 		// 本生产基线与上游 main 的差异：上游 #5610 改为缺省 off（显式 opt-in），
 		// 本基线一直以 session 为缺省并按此运行，保持现状（machine 移植只新增选项）。
-		{"无 extra 默认 session", newTestOAuthAccount(1, nil), codexFingerprintSession},
-		{"空值默认 session", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: ""}), codexFingerprintSession},
-		{"非法值默认 session", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "invalid"}), codexFingerprintSession},
+		{"OpenAI setup token 显式 session", &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken, Extra: map[string]any{codexFingerprintModeExtraKey: "session"}}, codexFingerprintSession},
+		{"OpenAI setup token 缺省 off", &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}, codexFingerprintOff},
+		{"Anthropic setup token", &Account{Platform: PlatformAnthropic, Type: AccountTypeSetupToken, Extra: map[string]any{codexFingerprintModeExtraKey: "session"}}, codexFingerprintOff},
+		{"无 extra 默认 machine", newTestOAuthAccount(1, nil), codexFingerprintMachine},
+		{"空值默认 machine", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: ""}), codexFingerprintMachine},
+		{"非法值默认 machine", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "invalid"}), codexFingerprintMachine},
 		{"显式 off", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "off"}), codexFingerprintOff},
 		{"device", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "device"}), codexFingerprintDevice},
 		{"session", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"}), codexFingerprintSession},
@@ -91,9 +94,9 @@ func TestNormalizeOpenAICodexFingerprintExtraForCreate(t *testing.T) {
 		expected codexFingerprintMode
 	}{
 		{
-			name:     "missing defaults to session",
+			name:     "missing defaults to machine",
 			account:  newTestOAuthAccount(1, nil),
-			expected: codexFingerprintSession,
+			expected: codexFingerprintMachine,
 		},
 		{
 			name:     "explicit off is preserved",
@@ -116,9 +119,9 @@ func TestNormalizeOpenAICodexFingerprintExtraForCreate(t *testing.T) {
 			expected: codexFingerprintMachine,
 		},
 		{
-			name:     "invalid value normalizes to session",
+			name:     "invalid value normalizes to machine",
 			account:  newTestOAuthAccount(5, map[string]any{codexFingerprintModeExtraKey: "invalid"}),
-			expected: codexFingerprintSession,
+			expected: codexFingerprintMachine,
 		},
 	}
 
@@ -169,7 +172,7 @@ func TestNormalizeOpenAICodexFingerprintExtraForUpdatePreservesExistingMode(t *t
 	}
 }
 
-func TestNormalizeOpenAICodexFingerprintExtraForUpdateNewOAuthDefaultsToSession(t *testing.T) {
+func TestNormalizeOpenAICodexFingerprintExtraForUpdateNewOAuthDefaultsToMachine(t *testing.T) {
 	account := newTestOAuthAccount(11, nil)
 	updated := normalizeOpenAICodexFingerprintExtraForUpdate(
 		account,
@@ -177,10 +180,10 @@ func TestNormalizeOpenAICodexFingerprintExtraForUpdateNewOAuthDefaultsToSession(
 		false,
 		codexFingerprintOff,
 	)
-	assert.Equal(t, string(codexFingerprintSession), updated[codexFingerprintModeExtraKey])
+	assert.Equal(t, string(codexFingerprintMachine), updated[codexFingerprintModeExtraKey])
 }
 
-func TestNormalizeOpenAICodexFingerprintExtraForUpdateInvalidValueDefaultsToSession(t *testing.T) {
+func TestNormalizeOpenAICodexFingerprintExtraForUpdateInvalidValueDefaultsToMachine(t *testing.T) {
 	account := newTestOAuthAccount(12, nil)
 	updated := normalizeOpenAICodexFingerprintExtraForUpdate(
 		account,
@@ -188,7 +191,7 @@ func TestNormalizeOpenAICodexFingerprintExtraForUpdateInvalidValueDefaultsToSess
 		false,
 		codexFingerprintOff,
 	)
-	assert.Equal(t, string(codexFingerprintSession), updated[codexFingerprintModeExtraKey])
+	assert.Equal(t, string(codexFingerprintMachine), updated[codexFingerprintModeExtraKey])
 }
 
 // --- resolveConvergedInstallationID ---
@@ -239,14 +242,14 @@ func TestResolveCodexFingerprintIDsFromRequest_ExplicitOff(t *testing.T) {
 	assert.Nil(t, ids, "显式 off 模式应返回 nil")
 }
 
-// 本基线缺省模式为 session（与上游 #5610 的缺省 off 不同），但 seed 化收敛
+// 本基线缺省模式为 machine（与上游 #5610 的缺省 off 不同），但 seed 化收敛
 // 要求系统管理 seed 存在（需求 #5）：无 seed ⇒ 等价 off，宁可降级也不伪造身份根。
-func TestResolveCodexFingerprintIDsFromRequest_DefaultSessionRequiresSeed(t *testing.T) {
-	// 缺省 session 且无 seed：resolve 返回 nil（等价 off）。
+func TestResolveCodexFingerprintIDsFromRequest_DefaultMachineRequiresSeed(t *testing.T) {
+	// 缺省 machine 且无 seed：resolve 返回 nil（等价 off）。
 	account := newTestOAuthAccount(1, nil)
-	assert.Nil(t, resolveCodexFingerprintIDsFromRequest(account, nil), "无 seed 时缺省 session 等价 off")
+	assert.Nil(t, resolveCodexFingerprintIDsFromRequest(account, nil), "无 seed 时缺省 machine 等价 off")
 
-	// 缺省 session 且 seed 合法（迁移 222 回填后的存量形态）：resolve 生效。
+	// 缺省 machine 且 seed 合法（迁移 222 回填后的存量形态）：resolve 生效。
 	backfilled := &Account{
 		ID:       2,
 		Platform: PlatformOpenAI,
@@ -254,8 +257,8 @@ func TestResolveCodexFingerprintIDsFromRequest_DefaultSessionRequiresSeed(t *tes
 		Extra:    map[string]any{codexFingerprintSeedExtraKey: testCodexFingerprintSeed},
 	}
 	ids := resolveCodexFingerprintIDsFromRequest(backfilled, nil)
-	require.NotNil(t, ids, "回填 seed 后缺省 session 应生效")
-	assert.Equal(t, codexFingerprintSession, ids.mode)
+	require.NotNil(t, ids, "回填 seed 后缺省 machine 应生效")
+	assert.Equal(t, codexFingerprintMachine, ids.mode)
 }
 
 // 管理员显式 opt-in 的账号行为不变。
@@ -993,7 +996,7 @@ func TestBuildUpstreamRequestOpenAIPassthrough_AppliesStagedFingerprint(t *testi
 	c.Request.Header.Set("originator", "codex_cli_rs")
 	c.Request.Header.Set("x-codex-turn-metadata", `{"installation_id":"real-install","session_id":"real-session","sandbox":"seatbelt"}`)
 
-	// 复刻 forwardOpenAIPassthrough 的解析+暂存 seam（默认 session 模式）
+	// 复刻 forwardOpenAIPassthrough 的解析+暂存 seam（默认 machine 模式）
 	ids := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
 	require.NotNil(t, ids)
 	stageCodexFingerprintIDs(c, ids)
@@ -1002,17 +1005,14 @@ func TestBuildUpstreamRequestOpenAIPassthrough_AppliesStagedFingerprint(t *testi
 	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "test-token")
 	require.NoError(t, err)
 
-	// r3 fail-closed：session 模式的收敛头（installation/window/request-id）与
-	// turn-metadata 整体被终态 sanitizer 删除，下划线 session_id 以亲和隔离值
-	//（isolate(客户端 session) 16-hex）恢复——收敛值不得出现在出站。
-	assert.Regexp(t, `^[0-9a-f]{16}$`, req.Header.Get("session_id"))
-	assert.NotEqual(t, "real-client-session", req.Header.Get("session_id"), "客户端原始 session 不得出站")
-	assert.NotEqual(t, ids.sessionID, req.Header.Get("session_id"), "收敛值不得替代亲和隔离值")
-	assert.Empty(t, req.Header.Get("x-codex-installation-id"))
-	assert.Empty(t, req.Header.Get("x-codex-window-id"))
-	assert.Empty(t, req.Header.Get("x-client-request-id"))
+	assert.Equal(t, ids.sessionID, req.Header.Get("session_id"), "session 模式下出站 session_id 应为账号级收敛值")
+	assert.Equal(t, ids.installationID, req.Header.Get("x-codex-installation-id"))
+	assert.Equal(t, ids.windowID, req.Header.Get("x-codex-window-id"))
+	assert.Equal(t, ids.threadID, req.Header.Get("x-client-request-id"))
 	turnMetadata := req.Header.Get("x-codex-turn-metadata")
-	assert.Empty(t, turnMetadata, "turn-metadata 头整体终态删除（r3 形状）")
+	require.NotEmpty(t, turnMetadata)
+	assert.Contains(t, turnMetadata, ids.sessionID, "turn-metadata JSON 中的 session_id 应被收敛")
+	assert.Contains(t, turnMetadata, `"sandbox":"seatbelt"`, "turn-metadata 未指定字段应原样保留")
 }
 
 func TestBuildUpstreamRequestOpenAIPassthrough_OffModeKeepsIsolatedSession(t *testing.T) {
@@ -1034,10 +1034,7 @@ func TestBuildUpstreamRequestOpenAIPassthrough_OffModeKeepsIsolatedSession(t *te
 	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "test-token")
 	require.NoError(t, err)
 
-	// r3 语义：off 模式 OAuth 仍绑定稳定隔离会话（网关 isolate 值，非客户端
-	// 原始值，也不得收敛到指纹 session 值）。
 	assert.NotEmpty(t, req.Header.Get("session_id"))
-	assert.NotEqual(t, "real-client-session", req.Header.Get("session_id"), "off 模式不得透传客户端原始 session_id")
 	assert.NotEqual(t, resolveConvergedSessionID(testCodexFingerprintSeed), req.Header.Get("session_id"), "off 模式不得收敛 session_id")
 	assert.Empty(t, req.Header.Get("x-codex-window-id"))
 }

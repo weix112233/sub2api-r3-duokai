@@ -23,6 +23,7 @@ interface Props {
   preset: OpsRequestDetailsPreset
   platform?: string
   groupId?: number | null
+  resumeState?: boolean
 }
 
 const props = defineProps<Props>()
@@ -98,6 +99,7 @@ watch(
   () => props.modelValue,
   (open) => {
     if (open) {
+      if (props.resumeState) return
       page.value = 1
       pageSize.value = 10
       fetchData()
@@ -142,7 +144,6 @@ async function handleCopyRequestId(requestId: string) {
 
 function openErrorDetail(errorId: number | null | undefined) {
   if (!errorId) return
-  close()
   emit('openErrorDetail', errorId)
 }
 
@@ -204,7 +205,8 @@ const kindBadgeClass = (kind: string) => {
                   </div>
                   <div class="break-all text-xs text-gray-600 dark:text-gray-300">{{ row.model || '-' }}</div>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
-                    <span>{{ typeof row.duration_ms === 'number' ? `${row.duration_ms} ms` : '-' }}</span>
+                    <span>{{ t('admin.ops.requestDetails.table.duration') }}: {{ typeof row.duration_ms === 'number' ? `${row.duration_ms} ms` : '-' }}</span>
+                    <span data-testid="request-detail-ttft">TTFT: {{ typeof row.first_token_ms === 'number' ? `${row.first_token_ms} ms` : '-' }}</span>
                     <span>{{ row.status_code ?? '-' }}</span>
                   </div>
                   <div v-if="row.request_id" class="flex items-center gap-2">
@@ -246,6 +248,9 @@ const kindBadgeClass = (kind: string) => {
                     {{ t('admin.ops.requestDetails.table.duration') }}
                   </th>
                   <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                    TTFT
+                  </th>
+                  <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                     {{ t('admin.ops.requestDetails.table.status') }}
                   </th>
                   <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
@@ -274,6 +279,9 @@ const kindBadgeClass = (kind: string) => {
                   </td>
                   <td class="whitespace-nowrap px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
                     {{ typeof row.duration_ms === 'number' ? `${row.duration_ms} ms` : '-' }}
+                  </td>
+                  <td data-testid="request-detail-ttft" class="whitespace-nowrap px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
+                    {{ typeof row.first_token_ms === 'number' ? `${row.first_token_ms} ms` : '-' }}
                   </td>
                   <td class="whitespace-nowrap px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
                     {{ row.status_code ?? '-' }}

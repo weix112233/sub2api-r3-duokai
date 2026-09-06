@@ -29,8 +29,7 @@ func TestGetStickySessionAccountID_FallbackToLegacyKey(t *testing.T) {
 	}
 
 	ctx := withOpenAILegacySessionHash(context.Background(), "legacy-hash")
-	groupID := int64(1)
-	accountID, err := svc.getStickySessionAccountID(ctx, &groupID, "new-hash")
+	accountID, err := svc.getStickySessionAccountID(ctx, nil, "new-hash")
 	require.NoError(t, err)
 	require.Equal(t, int64(42), accountID)
 
@@ -55,8 +54,7 @@ func TestSetStickySessionAccountID_DualWriteOldEnabled(t *testing.T) {
 	}
 
 	ctx := withOpenAILegacySessionHash(context.Background(), "legacy-hash")
-	groupID := int64(1)
-	err := svc.setStickySessionAccountID(ctx, &groupID, "new-hash", 9, openaiStickySessionTTL)
+	err := svc.setStickySessionAccountID(ctx, nil, "new-hash", 9, openaiStickySessionTTL)
 	require.NoError(t, err)
 	require.Equal(t, int64(9), cache.sessionBindings["openai:new-hash"])
 	require.Equal(t, int64(9), cache.sessionBindings["openai:legacy-hash"])
@@ -79,34 +77,11 @@ func TestSetStickySessionAccountID_DualWriteOldDisabled(t *testing.T) {
 	}
 
 	ctx := withOpenAILegacySessionHash(context.Background(), "legacy-hash")
-	groupID := int64(1)
-	err := svc.setStickySessionAccountID(ctx, &groupID, "new-hash", 9, openaiStickySessionTTL)
+	err := svc.setStickySessionAccountID(ctx, nil, "new-hash", 9, openaiStickySessionTTL)
 	require.NoError(t, err)
 	require.Equal(t, int64(9), cache.sessionBindings["openai:new-hash"])
 	_, exists := cache.sessionBindings["openai:legacy-hash"]
 	require.False(t, exists)
-}
-
-func TestStickySessionCache_NilGroupFailsClosed(t *testing.T) {
-	cache := &stubGatewayCache{
-		sessionBindings: map[string]int64{
-			"openai:new-hash": 42,
-		},
-	}
-	svc := &OpenAIGatewayService{cache: cache}
-
-	accountID, err := svc.getStickySessionAccountID(context.Background(), nil, "new-hash")
-	require.NoError(t, err)
-	require.Zero(t, accountID)
-
-	require.NoError(t, svc.setStickySessionAccountID(
-		context.Background(),
-		nil,
-		"other-hash",
-		9,
-		openaiStickySessionTTL,
-	))
-	require.NotContains(t, cache.sessionBindings, "openai:other-hash")
 }
 
 func TestSnapshotOpenAICompatibilityFallbackMetrics(t *testing.T) {

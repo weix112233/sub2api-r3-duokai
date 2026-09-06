@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -92,8 +91,9 @@ func TestCodexMachineChain_HTTP_ThirdParty_KeepsUnderscoreSessionNoConversation(
 		svc, upstream := newMachineChainService()
 		account := newMachineChainAccount(t, 6501, testCodexFingerprintSeed, false, "")
 		_, _ = svc.Forward(context.Background(), c, account, body)
-		// 非透传源头：session_id = isolate(apiKeyID, 出站 pck)（openai_gateway_forward.go buildUpstreamRequest）
-		assertMachineThirdPartyOutbound(t, upstream.lastReq, upstream.lastBody, isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, pckP), "opencode-key", pckP)
+		// 非透传链保留客户端原始 pck 给 header builder，账号 namespace 只应用一次；
+		// body 中的 pck 再由 machine sink 独立做 1:1 假名化。
+		assertMachineThirdPartyOutbound(t, upstream.lastReq, upstream.lastBody, isolateOpenAIUpstreamSessionID(testMachineThirdPartyAPIKeyID, account, "opencode-key"), "opencode-key", pckP)
 	})
 	t.Run("passthrough", func(t *testing.T) {
 		c, body := machineThirdPartyRequest(t, "/v1/responses", machineThirdPartyBodyWithPck, testMachineThirdPartyAPIKeyID, map[string]string{"session_id": "underscore-only"})
@@ -101,7 +101,7 @@ func TestCodexMachineChain_HTTP_ThirdParty_KeepsUnderscoreSessionNoConversation(
 		account := newMachineChainAccount(t, 6502, testCodexFingerprintSeed, true, "")
 		_, _ = svc.Forward(context.Background(), c, account, body)
 		// 透传源头：客户端带 session_id 时 session_id = isolate(apiKeyID, 客户端 session_id)（openai_gateway_passthrough.go）
-		assertMachineThirdPartyOutbound(t, upstream.lastReq, upstream.lastBody, isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, "underscore-only"), "opencode-key", pckP)
+		assertMachineThirdPartyOutbound(t, upstream.lastReq, upstream.lastBody, isolateOpenAIUpstreamSessionID(testMachineThirdPartyAPIKeyID, account, "underscore-only"), "opencode-key", pckP)
 		assert.Equal(t, "hi", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String(), "透传 body 其余字节原样")
 	})
 	t.Run("passthrough_without_client_session_header", func(t *testing.T) {
@@ -109,7 +109,7 @@ func TestCodexMachineChain_HTTP_ThirdParty_KeepsUnderscoreSessionNoConversation(
 		svc, upstream := newMachineChainService()
 		account := newMachineChainAccount(t, 6503, testCodexFingerprintSeed, true, "")
 		_, _ = svc.Forward(context.Background(), c, account, body)
-		assertMachineThirdPartyOutbound(t, upstream.lastReq, upstream.lastBody, isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, pckP), "opencode-key", pckP)
+		assertMachineThirdPartyOutbound(t, upstream.lastReq, upstream.lastBody, isolateOpenAIUpstreamSessionID(testMachineThirdPartyAPIKeyID, account, pckP), "opencode-key", pckP)
 	})
 }
 
@@ -229,12 +229,10 @@ func TestCodexMachineChain_HTTP_CodexDownstream_UnderscoreHeadersDropped(t *test
 
 // 兼容桥（chat completions / messages）：桥不带 Codex 会话头，出站与 Forward 非 Codex 下游同形态——
 // 保留桥 post-build 的下划线 session_id、无 conversation_id、无合成头、无 client_metadata。
-// r3 形态：chat 桥 session 为 UUID(isolate(apiKeyID, pck))；messages 桥由
-// buildUpstreamRequest 亲和派生设置 isolate 裸值 16-hex（r3 自身无 UUID 覆盖块）。
 func TestCodexMachineChain_Bridges_ThirdPartyShape(t *testing.T) {
 	account := newMachineChainAccount(t, 6551, testCodexFingerprintSeed, false, "")
-	wantChatSession := generateSessionUUID(isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, "cache-key-123"))
-	wantMessagesSession := isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, "cache-key-123")
+	// 桥 post-build 的 session_id 源头逻辑不变（openai_gateway_chat_completions.go / openai_gateway_messages.go）
+	wantSession := generateSessionUUID(isolateOpenAIUpstreamSessionID(testMachineThirdPartyAPIKeyID, account, "cache-key-123"))
 	pckP := codexMachinePseudonym([]byte(testCodexFingerprintSeed), "cache-key-123")
 
 	t.Run("chat_completions", func(t *testing.T) {
@@ -244,7 +242,7 @@ func TestCodexMachineChain_Bridges_ThirdPartyShape(t *testing.T) {
 		_, _ = svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(body), "cache-key-123", "gpt-5.4")
 		require.NotNil(t, up.lastReq)
 		assert.Equal(t, "https://chatgpt.com/backend-api/codex/responses", up.lastReq.URL.String())
-		assert.Equal(t, wantChatSession, up.lastReq.Header.Get("session_id"))
+		assert.Equal(t, wantSession, up.lastReq.Header.Get("session_id"))
 		for _, hdr := range codexSyntheticIdentityHeaderNames {
 			_, present := up.lastReq.Header[http.CanonicalHeaderKey(hdr)]
 			assert.False(t, present, "不得合成 / 补设头 %s", hdr)
@@ -260,7 +258,7 @@ func TestCodexMachineChain_Bridges_ThirdPartyShape(t *testing.T) {
 		svc, up := newMachineChainService()
 		_, _ = svc.ForwardAsAnthropic(context.Background(), c, account, []byte(body), "cache-key-123", "gpt-5.4")
 		require.NotNil(t, up.lastReq)
-		assert.Equal(t, wantMessagesSession, up.lastReq.Header.Get("session_id"))
+		assert.Equal(t, wantSession, up.lastReq.Header.Get("session_id"))
 		for _, hdr := range codexSyntheticIdentityHeaderNames {
 			_, present := up.lastReq.Header[http.CanonicalHeaderKey(hdr)]
 			assert.False(t, present, "不得合成 / 补设头 %s", hdr)
@@ -285,15 +283,12 @@ func machineThirdPartyBridgeContext(t *testing.T, path, body string, apiKeyID in
 	return c
 }
 
-// off 模式下两座桥保持 r3 生产行为：绑定不查 mode——chat 桥 session 为
-// UUID(isolate(apiKeyID, pck)) + conversation 同隔离值；messages 桥 session 为
-// isolate 16-hex、无 conversation 兜底；chat 桥 pck 仍走 pcv2 网关键改写
-// （off 只关指纹合成，不动 pcv2）；不产生任何 Codex 会话头。
+// off 模式下两座桥不做本地指纹收敛，但官方账号 namespace 仍隔离下划线 session_id
+// 和 chat 桥 prompt_cache_key；两座桥均不产生 Codex 会话头。
 func TestCodexMachineChain_Bridges_OffModeUnchanged(t *testing.T) {
 	account := newMachineChainAccount(t, 6552, testCodexFingerprintSeed, false, "")
 	account.Extra[codexFingerprintModeExtraKey] = "off"
-	wantChatSession := generateSessionUUID(isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, "cache-key-123"))
-	wantIsolated := isolateOpenAISessionID(testMachineThirdPartyAPIKeyID, "cache-key-123")
+	wantSession := generateSessionUUID(isolateOpenAIUpstreamSessionID(testMachineThirdPartyAPIKeyID, account, "cache-key-123"))
 
 	t.Run("chat_completions", func(t *testing.T) {
 		const body = `{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`
@@ -301,14 +296,11 @@ func TestCodexMachineChain_Bridges_OffModeUnchanged(t *testing.T) {
 		svc, up := newMachineChainService()
 		_, _ = svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(body), "cache-key-123", "gpt-5.4")
 		require.NotNil(t, up.lastReq)
-		assert.Equal(t, wantChatSession, up.lastReq.Header.Get("session_id"))
-		assert.Equal(t, wantIsolated, up.lastReq.Header.Get("conversation_id"), "off 模式 chat 桥仍按既有逻辑设置 conversation_id（同隔离值）")
+		assert.Equal(t, wantSession, up.lastReq.Header.Get("session_id"))
+		assert.NotEmpty(t, up.lastReq.Header.Get("conversation_id"), "off 模式 chat 桥仍按既有逻辑设置 conversation_id")
 		assert.Empty(t, up.lastReq.Header.Get("session-id"))
 		assert.Empty(t, up.lastReq.Header.Get("x-codex-turn-metadata"))
-		// r3：off 模式 pck 仍改写为 pcv2 网关键，原始客户端值不得出站。
-		outboundPck := gjson.GetBytes(up.lastBody, "prompt_cache_key").String()
-		assert.NotEqual(t, "cache-key-123", outboundPck, "off 模式不得透传原始 pck")
-		assert.True(t, strings.HasPrefix(outboundPck, "pcv2-"), "off 模式 pck 仍走 pcv2 网关键: %s", outboundPck)
+		assert.Equal(t, scopeCodexAccountIdentityValue(account, testMachineThirdPartyAPIKeyID, "prompt-cache", "cache-key-123"), gjson.GetBytes(up.lastBody, "prompt_cache_key").String())
 		assert.False(t, gjson.GetBytes(up.lastBody, "client_metadata.x-codex-turn-metadata").Exists())
 	})
 	t.Run("messages", func(t *testing.T) {
@@ -317,8 +309,7 @@ func TestCodexMachineChain_Bridges_OffModeUnchanged(t *testing.T) {
 		svc, up := newMachineChainService()
 		_, _ = svc.ForwardAsAnthropic(context.Background(), c, account, []byte(body), "cache-key-123", "gpt-5.4")
 		require.NotNil(t, up.lastReq)
-		assert.Equal(t, wantIsolated, up.lastReq.Header.Get("session_id"))
-		assert.Empty(t, up.lastReq.Header.Get("conversation_id"), "messages 桥无 conversation 兜底")
+		assert.Equal(t, wantSession, up.lastReq.Header.Get("session_id"))
 		assert.Empty(t, up.lastReq.Header.Get("session-id"))
 		assert.Empty(t, up.lastReq.Header.Get("x-codex-turn-metadata"))
 		assert.False(t, gjson.GetBytes(up.lastBody, "prompt_cache_key").Exists(), "messages 桥 OAuth 路径不带 body pck（既有行为）")

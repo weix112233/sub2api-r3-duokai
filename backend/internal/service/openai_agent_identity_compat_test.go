@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestAccountTestServiceOpenAICompactAgentIdentityUsesFreshAssertion(t *testing.T) {
@@ -103,7 +104,7 @@ func TestAccountTestServiceOpenAICompactAgentIdentityRecoversInvalidTaskOnce(t *
 	require.Equal(t, []int64{account.ID}, invalidator.accountIDs)
 }
 
-func TestOpenAIAgentIdentityPassthroughStripsSessionAndPromptCacheIdentifiers(t *testing.T) {
+func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := &Account{
@@ -131,19 +132,23 @@ func TestOpenAIAgentIdentityPassthroughStripsSessionAndPromptCacheIdentifiers(t 
 	require.NoError(t, err)
 	require.Equal(t, "AgentAssertion", strings.SplitN(req.Header.Get("Authorization"), " ", 2)[0])
 	require.Equal(t, "account-agent-passthrough", req.Header.Get("chatgpt-account-id"))
-	require.Empty(t, req.Header.Get("session_id"))
-	require.Empty(t, req.Header.Get("conversation_id"))
+	require.NotEqual(t, "client-session", req.Header.Get("session_id"))
+	require.NotEqual(t, "client-conversation", req.Header.Get("conversation_id"))
+	require.Equal(t, isolateOpenAIUpstreamSessionID(0, account, "client-session"), req.Header.Get("session_id"))
+	require.Equal(t, isolateOpenAIUpstreamSessionID(0, account, "client-conversation"), req.Header.Get("conversation_id"))
 	requestBody, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
-	require.NotContains(t, string(requestBody), `"prompt_cache_key":"cache-agent"`)
+	require.Contains(t, string(requestBody), `"prompt_cache_key":"cache-agent"`)
 
-	// Authentication mode must not reintroduce protocol correlation identifiers.
+	// Authentication mode must not affect session isolation or prompt-cache
+	// behavior. Compare the same request with the existing OAuth path instead
+	// of pinning this test to an implementation-specific hash.
 	oauthAccount := &Account{
 		ID:       26,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
-			"chatgpt_account_id": "account-oauth-passthrough",
+			"chatgpt_account_id": "account-agent-passthrough",
 		},
 	}
 	oauthRecorder := httptest.NewRecorder()
@@ -153,8 +158,8 @@ func TestOpenAIAgentIdentityPassthroughStripsSessionAndPromptCacheIdentifiers(t 
 	oauthContext.Request.Header.Set("conversation_id", "client-conversation")
 	oauthReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), oauthContext, oauthAccount, body, "oauth-token")
 	require.NoError(t, err)
-	require.Equal(t, isolateOpenAISessionID(0, "client-session"), oauthReq.Header.Get("session_id"))
-	require.Equal(t, isolateOpenAISessionID(0, "client-conversation"), oauthReq.Header.Get("conversation_id"))
+	require.Equal(t, oauthReq.Header.Get("session_id"), req.Header.Get("session_id"))
+	require.Equal(t, oauthReq.Header.Get("conversation_id"), req.Header.Get("conversation_id"))
 }
 
 func TestOpenAIAgentIdentityErrorRedactionDoesNotLeakCredentialValues(t *testing.T) {
@@ -435,6 +440,51 @@ func TestOpenAIAgentIdentityCompatRoutesRecoverInvalidTaskOnce(t *testing.T) {
 			require.Equal(t, "task-compat-new", account.GetCredential("task_id"))
 		})
 	}
+}
+
+func TestOpenAIAgentIdentityChatRecoveryKeepsAutoDerivedSessionIsolationStable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key, privateKey := newTestAgentIdentityKey(t)
+	account := &Account{
+		ID: 52, Name: "agent-identity", Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, Concurrency: 1,
+		Credentials: map[string]any{
+			"auth_mode":         OpenAIAuthModeAgentIdentity,
+			"agent_runtime_id":  key.runtimeID,
+			"agent_private_key": privateKey,
+			"task_id":           "task-cache-old",
+		},
+		Extra: map[string]any{"openai_responses_supported": true},
+	}
+	repo := &agentIdentityForwardRepo{account: account}
+	registerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"task_id":"task-cache-new"}`)
+	}))
+	defer registerServer.Close()
+	oldBase := openAIAgentIdentityAuthAPIBaseURL
+	openAIAgentIdentityAuthAPIBaseURL = registerServer.URL
+	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
+
+	invalidTask := func() *http.Response {
+		return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"invalid_task_id"}}`))}
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{invalidTask(), invalidTask()}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, accountRepo: repo, httpUpstream: upstream}
+	body := []byte(`{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Set("api_key", &APIKey{ID: 99})
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.4")
+	require.Error(t, err)
+	require.Len(t, upstream.requests, 2)
+	firstKey := gjson.GetBytes(upstream.bodies[0], "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").String()
+	require.NotEmpty(t, firstKey)
+	require.Equal(t, firstKey, secondKey)
+	require.Equal(t, generateSessionUUID(isolateOpenAIUpstreamSessionID(99, codexAccountIdentitySource(c, account), firstKey)), upstream.requests[0].Header.Get("session_id"))
+	require.Equal(t, upstream.requests[0].Header.Get("session_id"), upstream.requests[1].Header.Get("session_id"))
 }
 
 func decodeAgentAssertionTask(t *testing.T, header string) string {

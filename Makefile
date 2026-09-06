@@ -15,11 +15,11 @@ FRONTEND_CRITICAL_VITEST := \
 	src/features/channel-monitor-v2/__tests__/monitorFormat.spec.ts \
 	src/features/channel-monitor-v2/__tests__/monitorZoom.spec.ts
 
-# 一键编译前后端。后端二进制会嵌入 frontend build 产物，因此必须先完成前端构建。
-build: build-backend
+# 一键编译前后端
+build: build-backend build-frontend
 
 # 编译后端（复用 backend/Makefile）
-build-backend: build-frontend
+build-backend:
 	@$(MAKE) -C backend build
 
 # 编译前端（需要已安装依赖）

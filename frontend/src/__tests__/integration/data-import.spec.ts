@@ -69,6 +69,16 @@ describe('ImportDataModal', () => {
     expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportSelectFile')
   })
 
+  it('选择文件控件由真实文件输入直接承接点击', () => {
+    const wrapper = mountModal()
+    const input = wrapper.get('input[type="file"]')
+
+    expect(input.classes()).not.toContain('hidden')
+    expect(input.classes()).toContain('opacity-0')
+    expect(input.attributes('aria-label')).toBe('common.chooseFile')
+    expect(input.attributes()).toHaveProperty('multiple')
+  })
+
   it('无效 JSON 时按文件名提示解析失败', async () => {
     const { adminAPI } = await import('@/api/admin')
     const wrapper = mountModal()
@@ -205,8 +215,7 @@ describe('ImportDataModal', () => {
     expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportCompletedWithErrors')
     expect(wrapper.emitted('imported')).toBeUndefined()
 
-    // 第二个 btn-secondary 是 footer 的取消按钮(第一个是选择文件)
-    await wrapper.findAll('button.btn-secondary')[1]!.trigger('click')
+    await wrapper.get('button.btn-secondary').trigger('click')
 
     expect(wrapper.emitted('imported')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)

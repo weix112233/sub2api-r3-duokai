@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -435,28 +434,6 @@ func TestOpenAITokenProvider_CacheGetError(t *testing.T) {
 
 	// Should gracefully degrade and return from credentials
 	token, err := provider.GetAccessToken(context.Background(), account)
-	require.NoError(t, err)
-	require.Equal(t, "fallback-token", token)
-}
-
-func TestOpenAITokenProvider_RedisNilCacheMissFallsBackWithoutFailure(t *testing.T) {
-	cache := newOpenAITokenCacheStub()
-	cache.getErr = redis.Nil
-
-	expiresAt := time.Now().Add(1 * time.Hour).Format(time.RFC3339)
-	account := &Account{
-		ID:       1071,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
-		Credentials: map[string]any{
-			"access_token": "fallback-token",
-			"expires_at":   expiresAt,
-		},
-	}
-
-	provider := NewOpenAITokenProvider(nil, cache, nil)
-	token, err := provider.GetAccessToken(context.Background(), account)
-
 	require.NoError(t, err)
 	require.Equal(t, "fallback-token", token)
 }

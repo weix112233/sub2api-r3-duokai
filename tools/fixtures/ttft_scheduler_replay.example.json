@@ -1,0 +1,46 @@
+{
+  "schema": "sub2api.scheduler-replay.v1",
+  "sticky_weighted": false,
+  "current_weights": {
+    "priority": 1.0,
+    "load": 1.0,
+    "queue": 0.7,
+    "error_rate": 0.8,
+    "ttft": 0.5,
+    "reset": 0.0,
+    "quota_headroom": 0.0,
+    "upstream_cost": 0.0,
+    "previous_response": 5.0,
+    "session_sticky": 3.0
+  },
+  "candidate_weights": {
+    "priority": 1.0,
+    "load": 1.0,
+    "queue": 0.7,
+    "error_rate": 0.8,
+    "ttft": 2.0,
+    "reset": 0.0,
+    "quota_headroom": 0.0,
+    "upstream_cost": 0.0,
+    "previous_response": 5.0,
+    "session_sticky": 3.0
+  },
+  "accounts": [
+    {
+      "account_ref": "acct_fast",
+      "priority": 10,
+      "load_rate": 65,
+      "waiting_count": 2,
+      "error_rate": 0.05,
+      "ttft_ms": 300
+    },
+    {
+      "account_ref": "acct_slow",
+      "priority": 10,
+      "load_rate": 20,
+      "waiting_count": 0,
+      "error_rate": 0.05,
+      "ttft_ms": 4000
+    }
+  ]
+}

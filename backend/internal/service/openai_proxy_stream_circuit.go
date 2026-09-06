@@ -15,15 +15,13 @@ const (
 	defaultOpenAIProxyStreamFailureWindow     = time.Minute
 	defaultOpenAIProxyStreamQuarantineTTL     = 10 * time.Minute
 	defaultOpenAIProxyStreamCircuitMaxEntries = 4096
+	defaultOpenAIProxyChainQuarantineTTL      = 5 * time.Second
 	// defaultOpenAIProxyStreamFailureCollapse merges disconnects that land
 	// within this interval into a single failure event. One proxy or HTTP/2
 	// connection loss kills every stream multiplexed on it at the same
 	// moment; counting each stream separately would trip the breaker from a
 	// single upstream event (#5056).
 	defaultOpenAIProxyStreamFailureCollapse = 3 * time.Second
-	// openAIProxyStreamFailOpenLogInterval rate-limits the fail-open warning
-	// so an outage-mode burst does not flood the log.
-	openAIProxyStreamFailOpenLogInterval = 5 * time.Second
 )
 
 type openAIProxyStreamCircuitSettings struct {
@@ -36,6 +34,7 @@ type openAIProxyStreamCircuitSettings struct {
 }
 
 type openAIProxyStreamCircuitEntry struct {
+	chainFailure  bool
 	failureCount  int
 	windowStart   time.Time
 	lastFailureAt time.Time
@@ -124,6 +123,9 @@ func (c *openAIProxyStreamCircuit) recordFailure(proxyID int64, now time.Time) (
 		c.entries[proxyID] = entry
 		return false, entry.blockedUntil
 	}
+	if entry.chainFailure {
+		entry = openAIProxyStreamCircuitEntry{}
+	}
 	if !exists {
 		c.ensureCapacityLocked(now)
 	}
@@ -152,13 +154,48 @@ func (c *openAIProxyStreamCircuit) recordFailure(proxyID int64, now time.Time) (
 	return tripped, entry.blockedUntil
 }
 
+// quarantine immediately blocks a proxy after an explicit proxy-chain failure.
+// Unlike a stream disconnect, a CONNECT gateway error is already attributed to
+// the shared relay boundary and must not wait for another account to fail.
+func (c *openAIProxyStreamCircuit) quarantine(proxyID int64, now time.Time) (bool, time.Time) {
+	if c == nil || c.settings.disabled || proxyID <= 0 {
+		return false, time.Time{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, exists := c.entries[proxyID]
+	if exists && now.Before(entry.blockedUntil) {
+		entry.lastTouched = now
+		c.entries[proxyID] = entry
+		return false, entry.blockedUntil
+	}
+	if !exists {
+		c.ensureCapacityLocked(now)
+	}
+	entry.failureCount = c.settings.failureThreshold
+	entry.chainFailure = true
+	entry.windowStart = now
+	entry.lastFailureAt = now
+	entry.lastTouched = now
+	entry.blockedUntil = now.Add(min(c.settings.quarantineTTL, defaultOpenAIProxyChainQuarantineTTL))
+	c.entries[proxyID] = entry
+	return true, entry.blockedUntil
+}
+
 func (c *openAIProxyStreamCircuit) recordSuccess(proxyID int64) bool {
 	if c == nil || proxyID <= 0 {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.entries[proxyID]; !ok {
+	entry, ok := c.entries[proxyID]
+	if !ok {
+		return false
+	}
+	// An older established stream does not prove that new CONNECT handshakes
+	// recovered. Let this short, connection-specific quarantine expire.
+	if entry.chainFailure {
 		return false
 	}
 	delete(c.entries, proxyID)
@@ -180,25 +217,6 @@ func (c *openAIProxyStreamCircuit) isBlocked(proxyID int64, now time.Time) bool 
 		return false
 	}
 	return true
-}
-
-// activeBlockCount reports how many proxies are currently quarantined. It
-// gates the fail-open retry: a "no available accounts" selection result only
-// warrants a second, quarantine-blind pass when the circuit is actually
-// withholding capacity.
-func (c *openAIProxyStreamCircuit) activeBlockCount(now time.Time) int {
-	if c == nil || c.settings.disabled {
-		return 0
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	count := 0
-	for _, entry := range c.entries {
-		if !entry.blockedUntil.IsZero() && now.Before(entry.blockedUntil) {
-			count++
-		}
-	}
-	return count
 }
 
 func (c *openAIProxyStreamCircuit) ensureCapacityLocked(now time.Time) {
@@ -255,6 +273,30 @@ func (s *OpenAIGatewayService) recordOpenAIProxyStreamDisconnect(account *Accoun
 	)
 }
 
+// recordOpenAIProxyChainFailure feeds explicit proxy CONNECT failures into the
+// same proxy-ID circuit as stream disconnects. Accounts sharing one proxy are
+// therefore isolated together instead of rediscovering the same dead relay on
+// every request.
+func (s *OpenAIGatewayService) recordOpenAIProxyChainFailure(account *Account, chainErr error, upstreamRequestID string) {
+	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
+	if !ok || chainErr == nil {
+		return
+	}
+	circuit := s.getOpenAIProxyStreamCircuit()
+	tripped, until := circuit.quarantine(proxyID, time.Now())
+	if !tripped {
+		return
+	}
+	logger.L().With(zap.String("component", "service.openai_gateway")).Warn(
+		"openai.proxy_quarantined_chain_failure",
+		zap.Int64("proxy_id", proxyID),
+		zap.Int64("account_id", account.ID),
+		zap.Time("until", until),
+		zap.String("upstream_request_id", upstreamRequestID),
+		zap.String("error", sanitizeUpstreamErrorMessage(chainErr.Error())),
+	)
+}
+
 func (s *OpenAIGatewayService) clearOpenAIProxyStreamDisconnect(account *Account) {
 	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
 	if !ok {
@@ -265,48 +307,11 @@ func (s *OpenAIGatewayService) clearOpenAIProxyStreamDisconnect(account *Account
 	}
 }
 
-// openAIProxyStreamQuarantineBypassKey marks a selection pass that must ignore
-// proxy quarantine. It is set for the second, fail-open selection attempt when
-// the first pass found no available account while the circuit was withholding
-// proxies: a degraded proxy is strictly better than answering 502 (#5056).
-type openAIProxyStreamQuarantineBypassKey struct{}
-
-func withOpenAIProxyStreamQuarantineBypass(ctx context.Context) context.Context {
-	return context.WithValue(ctx, openAIProxyStreamQuarantineBypassKey{}, true)
-}
-
-func openAIProxyStreamQuarantineBypassed(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	bypassed, _ := ctx.Value(openAIProxyStreamQuarantineBypassKey{}).(bool)
-	return bypassed
-}
-
 func (s *OpenAIGatewayService) isOpenAIProxyStreamQuarantined(ctx context.Context, account *Account) bool {
 	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
 	if !ok {
 		return false
 	}
-	if openAIProxyStreamQuarantineBypassed(ctx) {
-		return false
-	}
 	circuit := s.getOpenAIProxyStreamCircuit()
 	return circuit != nil && circuit.isBlocked(proxyID, time.Now())
-}
-
-// logOpenAIProxyStreamQuarantineFailOpen emits a rate-limited warning when a
-// selection pass had to re-admit quarantined proxies to serve at all.
-func (s *OpenAIGatewayService) logOpenAIProxyStreamQuarantineFailOpen(requestedModel string, blockedProxies int) {
-	now := time.Now().UnixNano()
-	last := s.openaiProxyStreamFailOpenLogAt.Load()
-	if now-last < int64(openAIProxyStreamFailOpenLogInterval) ||
-		!s.openaiProxyStreamFailOpenLogAt.CompareAndSwap(last, now) {
-		return
-	}
-	logger.L().With(zap.String("component", "service.openai_gateway")).Warn(
-		"openai.proxy_stream_quarantine_fail_open",
-		zap.Int("blocked_proxies", blockedProxies),
-		zap.String("model", requestedModel),
-	)
 }

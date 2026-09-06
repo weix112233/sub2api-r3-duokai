@@ -57,52 +57,40 @@ func TestCodexIdentityHeaders_WhitelistParityAcrossHTTPAndWS(t *testing.T) {
 		assert.False(t, openaiPassthroughAllowedHeaders[name], "openaiPassthroughAllowedHeaders 不应包含 %s（images 复用）", name)
 		assert.False(t, openaiAllowedHeaders[name], "openaiAllowedHeaders 不应包含 %s", name)
 	}
-	// WS 拷贝列表 + 终态收口：machine 账号逐个拷贝且签发值存活（此处以已签发假名
-	// 模拟 sink 改写后的客户端头）；非 machine 账号拷贝的原始值被终态 sanitizer
-	// fail-closed 删除（r3 出站形状），子 Agent 头不拷贝。
+	// WS 拷贝列表：machine 账号逐个拷贝；非 machine 账号只拷贝 HEAD 既有的 5 个，子 Agent 头不拷贝
 	svc := &OpenAIGatewayService{cfg: &config.Config{}}
 	c := newFingerprintStageTestContext(t)
-	machine := newTestOAuthAccount(7001, map[string]any{codexFingerprintModeExtraKey: "machine", codexFingerprintSeedExtraKey: testCodexFingerprintSeed})
-	machineIDs := resolveCodexFingerprintIDsFromRequest(machine, nil)
-	require.NotNil(t, machineIDs)
-	issued := map[string]string{}
 	for _, name := range codexIdentityHeaderParityList {
-		issued[name] = machineIDs.machinePseudonym("value-" + name)
-		c.Request.Header.Set(name, issued[name])
+		c.Request.Header.Set(name, "value-"+name)
 	}
-	stageCodexFingerprintIDs(c, machineIDs)
+	machine := newTestOAuthAccount(7001, map[string]any{codexFingerprintModeExtraKey: "machine", codexFingerprintSeedExtraKey: testCodexFingerprintSeed})
 	headers, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, machine, "tok", OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}, false, "", "", "", "", "")
 	require.NoError(t, err)
 	for _, name := range codexIdentityHeaderParityList {
-		want := issued[name]
-		if name == "x-codex-installation-id" {
-			// machine 头 sink 将 installation 覆写为账号级收敛恒定值。
-			want = machineIDs.installationID
-		}
-		assert.Equal(t, want, headers.Get(name), "WS 握手头拷贝列表（machine）缺少 %s", name)
+		assert.Equal(t, "value-"+name, headers.Get(name), "WS 握手头拷贝列表（machine）缺少 %s", name)
 	}
 	for _, mode := range []string{"off", "device", "session", "full"} {
-		// 独立 context + 原始客户端值：非 machine 不stage machine IDs，避免跨账号残留。
-		cOther := newFingerprintStageTestContext(t)
-		for _, name := range codexIdentityHeaderParityList {
-			cOther.Request.Header.Set(name, "value-"+name)
+		// 本用例只验证握手白名单，不混入账号 namespace 或 staged 指纹 sink。
+		other := &Account{
+			ID:       7001,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeOAuth,
+			Extra:    map[string]any{codexFingerprintModeExtraKey: mode},
 		}
-		other := newTestOAuthAccount(7004, map[string]any{codexFingerprintModeExtraKey: mode, codexFingerprintSeedExtraKey: testCodexFingerprintSeed})
-		headers, _, err := svc.buildOpenAIWSHeaders(context.Background(), cOther, other, "tok", OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}, false, "", "", "", "", "")
+		headers, _, err := svc.buildOpenAIWSHeaders(context.Background(), c, other, "tok", OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}, false, "", "", "", "", "")
 		require.NoError(t, err)
 		for _, name := range codexSubagentIdentityHeaderList {
 			assert.Empty(t, headers.Get(name), "mode=%s WS 握手不应拷贝 %s", mode, name)
 		}
-		// r3 fail-closed：拷贝进来的原始身份值（HEAD 既有 5 键）终态删除。
 		for _, name := range []string{"x-codex-window-id", "x-codex-installation-id", "session-id", "thread-id", "x-client-request-id"} {
-			assert.Empty(t, headers.Get(name), "mode=%s WS 握手 %s 原始值终态删除（r3 形状）", mode, name)
+			assert.Equal(t, "value-"+name, headers.Get(name), "mode=%s WS 握手 HEAD 既有拷贝 %s 不变", mode, name)
 		}
 	}
 }
 
-// 非 machine 模式：会话/子 Agent 身份头在两条 HTTP 链路维持 HEAD 行为（丢弃）；
-// r3 fail-closed 之下 HEAD 既有白名单键（installation / window）的原始客户端值
-// 同样被终态 sanitizer 删除——非 machine 出站不携带任何客户端身份头。
+// 非 machine 模式：本轮新增的会话/子 Agent 身份头在两条 HTTP 链路维持 HEAD 行为（丢弃）。
+// HEAD 既有白名单键仍存在；off 下由官方账号 namespace 隔离，device 的 installation
+// 再由本地指纹 sink 覆盖为账号收敛值。
 func TestCodexIdentityHeaders_NonMachineModesDropSessionIdentityHeaders(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	body := []byte(`{"model":"gpt-5.2","input":[],"stream":true}`)
@@ -129,8 +117,16 @@ func TestCodexIdentityHeaders_NonMachineModesDropSessionIdentityHeaders(t *testi
 				req, err = svc.buildUpstreamRequest(context.Background(), c, account, body, "tok", true, "", true)
 			}
 			require.NoError(t, err)
-			for _, name := range codexIdentityHeaderParityList {
-				assert.Empty(t, req.Header.Get(name), "mode=%s passthrough=%v 头 %s 终态删除（r3 fail-closed）", mode, passthrough, name)
+			for _, name := range codexSessionIdentityHeaderList {
+				assert.Empty(t, req.Header.Get(name), "mode=%s passthrough=%v 头 %s 应维持 HEAD 行为被丢弃", mode, passthrough, name)
+			}
+			assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "window", "value-x-codex-window-id"), req.Header.Get("x-codex-window-id"), "mode=%s passthrough=%v", mode, passthrough)
+			if mode == "off" {
+				assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "installation", "value-x-codex-installation-id"), req.Header.Get("x-codex-installation-id"), "passthrough=%v", passthrough)
+			} else {
+				seed, ok := codexFingerprintSeed(account.Extra)
+				require.True(t, ok)
+				assert.Equal(t, resolveConvergedInstallationID(account, seed), req.Header.Get("x-codex-installation-id"), "passthrough=%v", passthrough)
 			}
 		}
 	}

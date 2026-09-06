@@ -52,6 +52,26 @@ func createOpenAICompactProbePayload(model string, isOAuth bool) map[string]any 
 	return payload
 }
 
+// openAICompactProbeFoundCompactionItem 判定探测响应是否产出了 compaction
+// 输出 item——v2 契约的核心（codex 缺它即 fatal "got 0 items"）。三种形态都
+// 认：① SSE 的 output_item.done/added（原生 v2 主形态，codex 只从这里收集
+// item）；② SSE 终态 response.completed 的 response.output[]（部分上游只在
+// 终态给出 item）；③ 整体 JSON 的 output[]（老网关链把请求降级成 unary）。
+func openAICompactProbeFoundCompactionItem(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	bodyText := string(body)
+	if _, found := findRawCompactionItemFromSSE(bodyText); found {
+		return true
+	}
+	if finalResponse, ok := extractCodexFinalResponse(bodyText); ok &&
+		responsesOutputHasCompactionItem(finalResponse) {
+		return true
+	}
+	return responsesOutputHasCompactionItem(body)
+}
+
 const (
 	// codexMachineCompactProbeAgentName 根线程 agent_name（codex-rs protocol/src/agent_path.rs AgentPath::ROOT，
 	// Display 为 "/root"）。
@@ -147,26 +167,6 @@ func applyCodexMachineCompactProbeIdentity(payload map[string]any, probeSessionI
 	return string(turnMetadataJSON)
 }
 
-// openAICompactProbeFoundCompactionItem 判定探测响应是否产出了 compaction
-// 输出 item——v2 契约的核心（codex 缺它即 fatal "got 0 items"）。三种形态都
-// 认：① SSE 的 output_item.done/added（原生 v2 主形态，codex 只从这里收集
-// item）；② SSE 终态 response.completed 的 response.output[]（部分上游只在
-// 终态给出 item）；③ 整体 JSON 的 output[]（老网关链把请求降级成 unary）。
-func openAICompactProbeFoundCompactionItem(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	bodyText := string(body)
-	if _, found := findRawCompactionItemFromSSE(bodyText); found {
-		return true
-	}
-	if finalResponse, ok := extractCodexFinalResponse(bodyText); ok &&
-		responsesOutputHasCompactionItem(finalResponse) {
-		return true
-	}
-	return responsesOutputHasCompactionItem(body)
-}
-
 func shouldMarkOpenAICompactUnsupported(status int, body []byte) bool {
 	switch status {
 	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
@@ -237,20 +237,6 @@ func buildOpenAICompactProbeExtraUpdates(resp *http.Response, body []byte, probe
 	return updates
 }
 
-// compactProbeSessionID 返回探测请求使用的会话标识。真实 Codex 的
-// session-id / thread-id 恒为 UUID（codex-protocol ThreadId 是 UUIDv7），
-// 探测既然与真实流量走同一族 /responses 端点，标识形态就必须同构——
-// 否则上游能凭 "probe_compact_5" 这类字面量一眼区分出探测流量。
-// 账号级稳定派生：重复探测复用同一会话，而不是每次新开一个。
-// machine 模式下该值经假名化出站（window 假名化只接受 UUID 形态前缀，
-// 见 codexMachineWindowPseudonymWith），字面量形态会原样漏出。
-func compactProbeSessionID(accountID int64) string {
-	if accountID <= 0 {
-		return deriveStableUUIDv4("sub2api:codex-compact-probe:v1:anonymous")
-	}
-	return deriveStableUUIDv4("sub2api:codex-compact-probe:v1:" + strconv.FormatInt(accountID, 10))
-}
-
 func mergeExtraUpdates(base map[string]any, more map[string]any) map[string]any {
 	if len(base) == 0 && len(more) == 0 {
 		return nil
@@ -263,4 +249,18 @@ func mergeExtraUpdates(base map[string]any, more map[string]any) map[string]any 
 		out[key] = value
 	}
 	return out
+}
+
+// compactProbeSessionID 返回探测请求使用的会话标识。真实 Codex 的
+// session-id / thread-id 恒为 UUID（codex-protocol ThreadId 是 UUIDv7），
+// 探测既然与真实流量走同一族 /responses 端点，标识形态就必须同构——
+// 否则上游能凭 "probe_compact_5" 这类字面量一眼区分出探测流量。
+// 账号级稳定派生：重复探测复用同一会话，而不是每次新开一个。
+// machine 模式下该值经假名化出站（window 假名化只接受 UUID 形态前缀，
+// 见 codexMachineWindowPseudonymWith），字面量形态会原样漏出。
+func compactProbeSessionID(accountID int64) string {
+	if accountID <= 0 {
+		return deriveStableUUIDv4("sub2api:codex-compact-probe:v1:anonymous")
+	}
+	return deriveStableUUIDv4("sub2api:codex-compact-probe:v1:" + strconv.FormatInt(accountID, 10))
 }

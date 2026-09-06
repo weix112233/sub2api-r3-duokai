@@ -279,10 +279,6 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 	if err != nil {
 		return nil, err
 	}
-	body, _, err = sanitizeCodexOutboundJSON(body)
-	if err != nil {
-		return nil, err
-	}
 	reqCtx := WithHTTPUpstreamRedirectsDisabled(WithHTTPUpstreamProfile(ctx, HTTPUpstreamProfileOpenAI))
 	upstreamReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, chatGPTLiveCallsURL, bytes.NewReader(body))
 	if err != nil {
@@ -308,7 +304,7 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 	upstreamReq.Header.Set(liveAttestationHeader, attestation)
 	applyLiveUpstreamIdentityHeaders(upstreamReq.Header)
 
-	resp, err := s.httpUpstream.Do(upstreamReq, resolveAccountProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.doOpenAIUpstream(upstreamReq, resolveAccountProxyURL(account), account)
 	if err != nil {
 		logLiveCreateStageFailure(ctx, account.ID, "upstream_transport", err)
 		return nil, err
@@ -407,11 +403,12 @@ func applyLiveUpstreamIdentityHeaders(headers http.Header) {
 	headers.Set("OpenAI-Alpha", "quicksilver=v2")
 	ensureCodexIdentityHeaders(headers)
 	enforceCodexIdentityHeaders(headers)
-	sanitizeCodexOutboundHeaders(headers)
-	// Live has no downstream Codex turn-state continuity channel. Keep this
-	// transport boundary fail-closed even if a future account override or
-	// compatibility layer adds the header before dialing.
-	headers.Del(openAICodexTurnStateHeader)
+	if strings.TrimSpace(headers.Get("session-id")) == "" {
+		headers.Set("session-id", uuid.NewString())
+	}
+	if strings.TrimSpace(headers.Get("thread-id")) == "" {
+		headers.Set("thread-id", uuid.NewString())
+	}
 	// Realtime/Live 不使用 Responses 的实验头。
 	headers.Del("OpenAI-Beta")
 }
@@ -533,14 +530,6 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 			if readErr != nil {
 				errCh <- readErr
 				return
-			}
-			if messageType == coderws.MessageText {
-				sanitized, _, sanitizeErr := sanitizeCodexOutboundJSON(payload)
-				if sanitizeErr != nil {
-					errCh <- sanitizeErr
-					return
-				}
-				payload = sanitized
 			}
 			if writeErr := upstream.WriteFrame(proxyCtx, messageType, payload); writeErr != nil {
 				errCh <- writeErr

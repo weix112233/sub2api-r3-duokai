@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/google/uuid"
 )
 
 // codexUpstreamMinVersion 上游 /backend-api/codex 接受的最低 version 头：
@@ -73,6 +74,38 @@ func SetCodexCanonicalUserAgentResolver(resolver func() string) {
 	codexCanonicalUAMu.Lock()
 	defer codexCanonicalUAMu.Unlock()
 	codexCanonicalUAResolver = resolver
+}
+
+// CodexCanonicalUserAgent 返回当前生效的规范 Codex User-Agent。
+// 取值走与推理相同的解析链：面板 UA 指纹 + 面板/自动同步版本号 + 编译期兜底。
+// 供无账号句柄的出站路径（OAuth 换 Token / 刷新）使用。
+func CodexCanonicalUserAgent() string {
+	return resolveCodexOutboundIdentity("").userAgent
+}
+
+// CodexCanonicalAuthIdentity 返回凭据面（auth.openai.com：换 Token / 刷新 / whoami）
+// 出站请求的身份对：规范 User-Agent 与配套 originator，与推理解析链同源。
+// 凭据面不发 version 头——真实 Codex 客户端在该面只携带 originator 与 User-Agent
+// （codex-rs login/default_client.rs 的 default_headers()），version 门槛
+// （issue #3901）只存在于 /backend-api/codex 推理面。
+func CodexCanonicalAuthIdentity() (userAgent, originator string) {
+	identity := resolveCodexOutboundIdentity("")
+	return identity.userAgent, identity.originator
+}
+
+// ApplyCodexCanonicalAuthIdentity 为凭据面出站请求写入身份对（不含 version）。
+func ApplyCodexCanonicalAuthIdentity(h http.Header) {
+	if h == nil {
+		return
+	}
+	userAgent, originator := CodexCanonicalAuthIdentity()
+	h.Set("user-agent", userAgent)
+	h.Set("originator", originator)
+}
+
+// CodexCanonicalClientVersion 返回当前生效的 Codex 客户端版本号。
+func CodexCanonicalClientVersion() string {
+	return resolveCodexOutboundIdentity("").version
 }
 
 // codexCanonicalUserAgent 返回出站规范 User-Agent。
@@ -154,13 +187,13 @@ func ensureCodexIdentityHeaders(h http.Header) {
 	h.Set("OpenAI-Beta", "responses=experimental")
 }
 
-// applyOpenAICodexProbeHeaders 为合成探测请求补齐协议协商头。
-// 不生成 window/session 等关联标识；探测请求不应新增上游关联数据。
+// applyOpenAICodexProbeHeaders 为合成探测请求补齐 Codex 身份和引擎指纹。
 func applyOpenAICodexProbeHeaders(h http.Header) {
 	if h == nil {
 		return
 	}
 	ensureCodexIdentityHeaders(h)
+	h.Set("X-Codex-Window-ID", uuid.NewString())
 }
 
 // enforceCodexIdentityHeaders 收口 OAuth（ChatGPT 内部接口）出站请求的客户端身份头。
@@ -209,6 +242,6 @@ func pairCodexIdentityHeaders(h http.Header) {
 	h.Set("user-agent", pairedUA)
 	h.Set("originator", originator)
 	if v := strings.TrimSpace(h.Get("version")); v != "" && CompareVersions(v, codexUpstreamMinVersion) < 0 {
-		h.Set("version", codexCLIVersion)
+		h.Set("version", resolveCodexOutboundIdentity("").version)
 	}
 }

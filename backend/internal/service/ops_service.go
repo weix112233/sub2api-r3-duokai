@@ -570,7 +570,6 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		out.Stage = truncateString(strings.TrimSpace(out.Stage), 64)
 		out.Scope = truncateString(strings.TrimSpace(out.Scope), 64)
 		out.Reason = truncateString(strings.TrimSpace(out.Reason), 128)
-		out.FirstClientOutputEventType = truncateString(strings.TrimSpace(out.FirstClientOutputEventType), 128)
 
 		if out.AccountID < 0 {
 			out.AccountID = 0
@@ -580,28 +579,6 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		}
 		if out.AtUnixMs < 0 {
 			out.AtUnixMs = 0
-		}
-		if out.Usage != nil {
-			usage := *out.Usage
-			if usage.InputTokens < 0 {
-				usage.InputTokens = 0
-			}
-			if usage.ImageInputTokens < 0 {
-				usage.ImageInputTokens = 0
-			}
-			if usage.OutputTokens < 0 {
-				usage.OutputTokens = 0
-			}
-			if usage.CacheCreationInputTokens < 0 {
-				usage.CacheCreationInputTokens = 0
-			}
-			if usage.CacheReadInputTokens < 0 {
-				usage.CacheReadInputTokens = 0
-			}
-			if usage.ImageOutputTokens < 0 {
-				usage.ImageOutputTokens = 0
-			}
-			out.Usage = &usage
 		}
 
 		msg := sanitizeUpstreamErrorMessage(strings.TrimSpace(out.Message))

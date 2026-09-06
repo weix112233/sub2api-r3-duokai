@@ -335,12 +335,8 @@ func TestCodexMachineChain_Failover_I2_NoResidualIDs(t *testing.T) {
 			assert.NotContains(t, v, pB, "off 账号头 %s 残留账号 B 假名", name)
 		}
 	}
-	// r3 fail-closed：off 账号透传时客户端原始身份头（window/installation）同样
-	// 被终态删除，仅下划线 session_id 以亲和隔离值恢复。
-	assert.Empty(t, reqOff.Header.Get("x-codex-window-id"), "off 账号客户端 window 头终态删除（r3 形状）")
-	assert.Empty(t, reqOff.Header.Get("x-codex-installation-id"), "off 账号客户端 installation 头终态删除（r3 形状）")
-	assert.NotEqual(t, testMachineChainRoot+":0", reqOff.Header.Get("x-codex-window-id"))
-	assert.NotEqual(t, "real-install", reqOff.Header.Get("x-codex-installation-id"))
+	assert.Equal(t, testMachineChainRoot+":0", reqOff.Header.Get("x-codex-window-id"))
+	assert.Equal(t, "real-install", reqOff.Header.Get("x-codex-installation-id"), "off 账号透传真实 installation")
 	assert.NotEmpty(t, reqOff.Header.Get("session_id"), "off 模式的下划线 session_id 源头逻辑不变")
 }
 
@@ -393,53 +389,52 @@ func TestCodexMachineChain_HTTP_Compact_MachineRewritesOthersSkip(t *testing.T) 
 	}
 }
 
-// I7 辅助：off / device / session / full 在同一下游请求下的出站行为不因 machine 引入而变化。
-// r3 语义：终态 sanitizer 对非 machine 一律 fail-closed——连字符身份头（含收敛值）
-// 全删，body 身份键全删，pck 改写为 pcv2 网关键；下划线 session_id/conversation_id
-// 由亲和派生隔离值设置。四个模式在 HTTP 出站形状上一致（与 r3 生产相同）。
+// I7 辅助：off / device / session / full 在同一下游请求下仍保持各自的指纹收敛语义。
+// 上游 v0.2.0 的账号 namespace 是独立安全层：未被本地模式收敛的客户端身份会按 OAuth
+// 凭据隔离，避免 scheduler failover 后跨账号重放同一组身份。
 func TestCodexMachineChain_HTTP_OtherModesUnchanged(t *testing.T) {
-	assertR3FailClosedShape := func(t *testing.T, req *http.Request, body []byte) {
-		assert.Empty(t, req.Header.Get("session-id"))
-		assert.Empty(t, req.Header.Get("thread-id"))
-		assert.Empty(t, req.Header.Get("x-client-request-id"))
-		assert.Empty(t, req.Header.Get("x-codex-window-id"))
-		assert.Empty(t, req.Header.Get("x-codex-installation-id"))
-		assert.Empty(t, req.Header.Get("x-codex-turn-metadata"))
-		assert.NotEmpty(t, req.Header.Get("session_id"), "下划线 session_id 仍由亲和派生隔离值设置")
-		assert.NotEqual(t, "underscore-session", req.Header.Get("session_id"), "客户端原始下划线 session 不得出站")
-		assert.NotEqual(t, testMachineChainRoot, req.Header.Get("session_id"), "客户端原始 cache key 不得作为 session 出站")
-		assert.NotEmpty(t, req.Header.Get("conversation_id"))
-		assert.NotEqual(t, "underscore-conversation", req.Header.Get("conversation_id"))
-		assert.False(t, gjson.GetBytes(body, "client_metadata.session_id").Exists(), "body 身份键 fail-closed 删除")
-		assert.False(t, gjson.GetBytes(body, "client_metadata.thread_id").Exists(), "body 身份键 fail-closed 删除")
-		outboundPck := gjson.GetBytes(body, "prompt_cache_key").String()
-		assert.True(t, strings.HasPrefix(outboundPck, "pcv2-"), "pck 改写为 pcv2 网关键: %s", outboundPck)
-		assert.NotEqual(t, testMachineChainRoot, outboundPck, "原始客户端 cache key 不得出站")
-	}
 	cases := []struct {
 		mode string
 		want func(t *testing.T, account *Account, req *http.Request, body []byte)
 	}{
 		{"off", func(t *testing.T, account *Account, req *http.Request, body []byte) {
-			assertR3FailClosedShape(t, req, body)
+			// 会话身份头白名单仅 machine 放行；off 维持 HEAD 行为（HTTP 丢弃连字符会话头），下划线 session_id 由源头逻辑设置
+			assert.Empty(t, req.Header.Get("session-id"))
+			assert.Empty(t, req.Header.Get("thread-id"))
+			assert.Empty(t, req.Header.Get("x-client-request-id"))
+			assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "window", testMachineChainRoot+":0"), req.Header.Get("x-codex-window-id"))
+			assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "installation", "real-install"), req.Header.Get("x-codex-installation-id"))
+			assert.NotEmpty(t, req.Header.Get("session_id"))
+			wantSession := scopeCodexAccountIdentityValue(account, 0, "session", testMachineChainRoot)
+			assert.Equal(t, wantSession, gjson.GetBytes(body, "client_metadata.session_id").String())
+			assert.Equal(t, wantSession, gjson.GetBytes(body, "prompt_cache_key").String())
 		}},
 		{"device", func(t *testing.T, account *Account, req *http.Request, body []byte) {
 			seed, _ := codexFingerprintSeed(account.Extra)
-			assertR3FailClosedShape(t, req, body)
-			assert.Empty(t, req.Header.Get("x-codex-installation-id"), "device 收敛 installation 同样被终态删除（r3 形状）")
-			assert.NotEqual(t, resolveConvergedInstallationID(account, seed), req.Header.Get("x-codex-installation-id"))
+			assert.Equal(t, resolveConvergedInstallationID(account, seed), req.Header.Get("x-codex-installation-id"))
+			assert.Empty(t, req.Header.Get("session-id"), "device 维持 HEAD 行为：连字符会话头不放行")
+			assert.NotEmpty(t, req.Header.Get("session_id"))
+			assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "session", testMachineChainRoot), gjson.GetBytes(body, "client_metadata.session_id").String())
 		}},
 		{"session", func(t *testing.T, account *Account, req *http.Request, body []byte) {
 			seed, _ := codexFingerprintSeed(account.Extra)
-			assertR3FailClosedShape(t, req, body)
-			assert.NotEqual(t, resolveConvergedSessionID(seed), req.Header.Get("session_id"), "收敛值不得替代亲和隔离值出站")
-			assert.NotContains(t, string(body), resolveConvergedSessionID(seed), "收敛值不得进入 body")
+			wantSession := resolveConvergedSessionID(seed)
+			wantThread := resolveConvergedThreadID(seed, testMachineChainRoot)
+			assert.Equal(t, wantSession, req.Header.Get("session-id"))
+			assert.Equal(t, wantSession, req.Header.Get("session_id"))
+			assert.Equal(t, wantThread, req.Header.Get("thread-id"))
+			assert.Equal(t, wantThread+":0", req.Header.Get("x-codex-window-id"))
+			assert.Equal(t, wantSession, gjson.GetBytes(body, "client_metadata.session_id").String())
+			assert.Equal(t, wantSession, gjson.GetBytes(body, "prompt_cache_key").String())
 		}},
 		{"full", func(t *testing.T, account *Account, req *http.Request, body []byte) {
 			seed, _ := codexFingerprintSeed(account.Extra)
-			assertR3FailClosedShape(t, req, body)
-			assert.NotEqual(t, resolveConvergedSessionID(seed), req.Header.Get("session_id"), "收敛值不得替代亲和隔离值出站")
-			assert.NotContains(t, string(body), resolveConvergedSessionID(seed), "收敛值不得进入 body")
+			wantSession := resolveConvergedSessionID(seed)
+			assert.Equal(t, wantSession, req.Header.Get("session-id"))
+			assert.Equal(t, wantSession, req.Header.Get("session_id"))
+			assert.Equal(t, wantSession, req.Header.Get("thread-id"))
+			assert.Equal(t, wantSession+":0", req.Header.Get("x-codex-window-id"))
+			assert.Equal(t, wantSession, gjson.GetBytes(body, "client_metadata.thread_id").String())
 		}},
 	}
 	for _, tc := range cases {
@@ -526,11 +521,13 @@ func TestCodexMachineChain_HTTP_MachineWithoutSeedBehavesLikeOff(t *testing.T) {
 	offBody, offHeader := run(t, "off")
 	machineBody, machineHeader := run(t, "machine")
 
-	// off 基线（r3 fail-closed）：body 身份键（含 device installation 补充与客户端
-	// session/thread）终态删除，pck 改写为 pcv2 网关键。
-	require.False(t, gjson.GetBytes(offBody, "client_metadata.x-codex-installation-id").Exists(), "off 基线：device installation 终态删除")
-	require.False(t, gjson.GetBytes(offBody, "client_metadata.session_id").Exists(), "off 基线：客户端 session 身份键终态删除")
-	require.True(t, strings.HasPrefix(gjson.GetBytes(offBody, "prompt_cache_key").String(), "pcv2-"), "off 基线：pck 改写为 pcv2")
+	// off 基线：有 device_id 时 helper 会补 installation，随后由官方账号 namespace
+	// 绑定到当前 OAuth 凭据；无 seed 的 machine 必须退化成完全相同的结果。
+	accountForExpectation := newMachineChainAccount(t, 6082, "", false, "")
+	accountForExpectation.Extra[codexFingerprintModeExtraKey] = "off"
+	delete(accountForExpectation.Extra, codexFingerprintSeedExtraKey)
+	require.Equal(t, scopeCodexAccountIdentityValue(accountForExpectation, 0, "installation", deviceID), gjson.GetBytes(offBody, "client_metadata.x-codex-installation-id").String())
+	require.Equal(t, scopeCodexAccountIdentityValue(accountForExpectation, 0, "session", testMachineChainRoot), gjson.GetBytes(offBody, "client_metadata.session_id").String())
 	assert.JSONEq(t, string(offBody), string(machineBody), "无 seed 的 machine 出站 body 必须与 off 完全一致")
 	for _, name := range []string{"x-codex-installation-id", "session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-turn-metadata", "session_id"} {
 		assert.Equal(t, offHeader.Values(name), machineHeader.Values(name), "头 %s 必须与 off 一致", name)

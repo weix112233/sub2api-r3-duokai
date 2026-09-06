@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -176,15 +178,15 @@ func TestGuardOpenAICodexTurnStateEcho(t *testing.T) {
 		require.Empty(t, h.Get("x-codex-turn-state"))
 	})
 
-	t.Run("no_provenance_strips_client_state", func(t *testing.T) {
+	t.Run("no_provenance_passthrough", func(t *testing.T) {
 		svc := &OpenAIGatewayService{}
 		c, _ := newTurnStateTestContext(t, 7, "sess-g3")
 		h := newOutbound("blob-unknown")
 		svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, h)
-		require.Empty(t, h.Get("x-codex-turn-state"))
+		require.Equal(t, "blob-unknown", h.Get("x-codex-turn-state"))
 	})
 
-	t.Run("expired_provenance_strips_and_prunes", func(t *testing.T) {
+	t.Run("expired_provenance_passthrough_and_pruned", func(t *testing.T) {
 		svc := &OpenAIGatewayService{}
 		c, _ := newTurnStateTestContext(t, 7, "sess-g4")
 		svc.openaiCodexTurnStateOrigins.Store("7\x00sess-g4", openAICodexTurnStateOrigin{
@@ -193,17 +195,17 @@ func TestGuardOpenAICodexTurnStateEcho(t *testing.T) {
 		})
 		h := newOutbound("blob-A")
 		svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, h)
-		require.Empty(t, h.Get("x-codex-turn-state"))
+		require.Equal(t, "blob-A", h.Get("x-codex-turn-state"))
 		_, ok := svc.openaiCodexTurnStateOrigins.Load("7\x00sess-g4")
 		require.False(t, ok)
 	})
 
-	t.Run("no_session_seed_strips", func(t *testing.T) {
+	t.Run("no_session_seed_noop", func(t *testing.T) {
 		svc := &OpenAIGatewayService{}
 		c, _ := newTurnStateTestContext(t, 7, "")
 		h := newOutbound("blob-A")
 		svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, h)
-		require.Empty(t, h.Get("x-codex-turn-state"))
+		require.Equal(t, "blob-A", h.Get("x-codex-turn-state"))
 	})
 
 	t.Run("no_echo_noop", func(t *testing.T) {
@@ -213,28 +215,6 @@ func TestGuardOpenAICodexTurnStateEcho(t *testing.T) {
 		svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, h)
 		require.Empty(t, h.Get("x-codex-turn-state"))
 	})
-}
-
-func TestChatCompletionsTurnStateBoundarySequence(t *testing.T) {
-	svc := &OpenAIGatewayService{}
-	c, _ := newTurnStateTestContext(t, 7, "sess-chat")
-	svc.relayOpenAICodexTurnState(c, &Account{ID: 42}, http.Header{
-		"X-Codex-Turn-State": []string{"blob-valid"},
-	})
-
-	// This mirrors the independent Chat Completions request builder: guard
-	// first, then the common header sanitizer.
-	headers := http.Header{}
-	headers.Set("X-Codex-Turn-State", "blob-valid")
-	svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 42}, headers)
-	sanitizeCodexOutboundHeaders(headers)
-	require.Equal(t, "blob-valid", headers.Get("X-Codex-Turn-State"))
-
-	foreign := http.Header{}
-	foreign.Set("X-Codex-Turn-State", "client-forged")
-	svc.guardOpenAICodexTurnStateEcho(c, &Account{ID: 43}, foreign)
-	sanitizeCodexOutboundHeaders(foreign)
-	require.Empty(t, foreign.Get("X-Codex-Turn-State"))
 }
 
 func TestSweepOpenAICodexTurnStateOrigins_PrunesExpiredEntries(t *testing.T) {
@@ -269,6 +249,19 @@ func TestWriteOpenAIPassthroughResponseHeaders_RelaysAndClearsTurnState(t *testi
 	// 上游缺失时清除残留（failover 换号防串扰）
 	writeOpenAIPassthroughResponseHeaders(dst, http.Header{"Content-Type": []string{"application/json"}}, nil)
 	require.Empty(t, dst.Get("X-Codex-Turn-State"))
+}
+
+func TestWriteOpenAIPassthroughResponseHeaders_RelaysReasoningIncluded(t *testing.T) {
+	dst := http.Header{}
+	src := http.Header{}
+	src.Set("X-Reasoning-Included", "1")
+
+	writeOpenAIPassthroughResponseHeaders(
+		dst,
+		src,
+		responseheaders.CompileHeaderFilter(config.ResponseHeaderConfig{}),
+	)
+	require.Equal(t, "1", dst.Get("X-Reasoning-Included"))
 }
 
 func TestEnsureOpenAIRemoteCompactionV2BetaFeature(t *testing.T) {

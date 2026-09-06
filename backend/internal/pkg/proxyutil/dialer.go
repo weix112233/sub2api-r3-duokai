@@ -28,6 +28,16 @@ const (
 	socks5DialKeepAlive = 30 * time.Second
 )
 
+// ConnectError preserves a CONNECT rejection before the target request is sent.
+// The canonical status text avoids reflecting untrusted proxy response text.
+type ConnectError struct {
+	StatusCode int
+}
+
+func (e *ConnectError) Error() string {
+	return fmt.Sprintf("proxy CONNECT failed: %d %s", e.StatusCode, http.StatusText(e.StatusCode))
+}
+
 // socks5ForwardDialer 是 SOCKS5 dialer 的底层拨号器。
 //
 // proxy.FromURL 的默认 forward dialer 是 proxy.Direct（零值 net.Dialer，无超时），
@@ -61,6 +71,18 @@ func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL) error
 	switch scheme {
 	case "http", "https":
 		transport.Proxy = http.ProxyURL(proxyURL)
+		previous := transport.OnProxyConnectResponse
+		transport.OnProxyConnectResponse = func(ctx context.Context, proxy *url.URL, req *http.Request, resp *http.Response) error {
+			if previous != nil {
+				if err := previous(ctx, proxy, req, resp); err != nil {
+					return err
+				}
+			}
+			if resp.StatusCode != http.StatusOK {
+				return &ConnectError{StatusCode: resp.StatusCode}
+			}
+			return nil
+		}
 		return nil
 
 	case "socks5", "socks5h":

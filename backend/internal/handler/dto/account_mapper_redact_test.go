@@ -100,3 +100,58 @@ func TestAccountFromServiceShallow_NilCredentialsOmitsStatus(t *testing.T) {
 	require.Nil(t, got.Credentials)
 	require.Nil(t, got.CredentialsStatus)
 }
+
+func TestAccountFromServiceShallow_FlattensTLSFingerprintForEligibleAccounts(t *testing.T) {
+	tests := []struct {
+		name        string
+		account     *service.Account
+		wantEnabled *bool
+		wantProfile *int64
+	}{
+		{
+			name: "openai oauth enabled with profile",
+			account: &service.Account{
+				ID:       1,
+				Platform: service.PlatformOpenAI,
+				Type:     service.AccountTypeOAuth,
+				Extra: map[string]any{
+					"enable_tls_fingerprint":     true,
+					"tls_fingerprint_profile_id": int64(12),
+				},
+			},
+			wantEnabled: ptr(true),
+			wantProfile: ptr(int64(12)),
+		},
+		{
+			name: "openai oauth explicit opt out",
+			account: &service.Account{
+				ID:       2,
+				Platform: service.PlatformOpenAI,
+				Type:     service.AccountTypeOAuth,
+				Extra:    map[string]any{"enable_tls_fingerprint": false},
+			},
+			wantEnabled: ptr(false),
+		},
+		{
+			name: "openai api key remains ineligible",
+			account: &service.Account{
+				ID:       3,
+				Platform: service.PlatformOpenAI,
+				Type:     service.AccountTypeAPIKey,
+				Extra:    map[string]any{"enable_tls_fingerprint": true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AccountFromServiceShallow(tt.account)
+			require.Equal(t, tt.wantEnabled, got.EnableTLSFingerprint)
+			require.Equal(t, tt.wantProfile, got.TLSFingerprintProfileID)
+		})
+	}
+}
+
+func ptr[T any](value T) *T {
+	return &value
+}

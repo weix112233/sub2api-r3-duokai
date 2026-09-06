@@ -107,6 +107,26 @@ func TestHandleOpenAIUpstreamTransportError_TransientFailsOverWithoutEviction(t 
 	require.Equal(t, 0, rec.Body.Len())
 }
 
+func TestHandleOpenAIUpstreamTransportError_ProxyChain502StopsFailover(t *testing.T) {
+	repo := &openaiTransportAccountRepoStub{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := &Account{ID: 100, Name: "shared-proxy-chain", Platform: PlatformOpenAI}
+	c, rec := newOpenAITransportErrTestContext()
+
+	err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account,
+		errors.New(`proxyconnect tcp: dial tcp 127.0.0.1:7896: 502 Bad Gateway`), false)
+
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.IsProxyChainFailure())
+	require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
+	require.Equal(t, http.StatusServiceUnavailable, failoverErr.ClientStatusCode)
+	require.Equal(t, "5", failoverErr.ResponseHeaders.Get("Retry-After"))
+	require.Empty(t, repo.tempUnschedCalls)
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Equal(t, 0, rec.Body.Len())
+}
+
 // context.Canceled means the client disconnected — do NOT fail over to another
 // account and do NOT temporarily evict this one.
 func TestHandleOpenAIUpstreamTransportError_ContextCanceled_NoFailoverNoEviction(t *testing.T) {

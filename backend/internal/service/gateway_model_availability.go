@@ -68,6 +68,10 @@ func (s *GatewayService) DiagnoseModelAvailabilityForPlatform(
 	if s.accountRepo == nil {
 		return ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: true}
 	}
+	candidateRepo, ok := s.accountRepo.(ModelAvailabilityCandidateRepository)
+	if !ok {
+		return ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: true}
+	}
 
 	useMixed := platform == PlatformAnthropic || platform == PlatformGemini
 	platforms := []string{platform}
@@ -88,7 +92,7 @@ func (s *GatewayService) DiagnoseModelAvailabilityForPlatform(
 		includeGrouped = true
 	}
 
-	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(ctx, queryGroupID, platforms, includeGrouped)
+	accounts, err := candidateRepo.ListModelAvailabilityCandidates(ctx, queryGroupID, platforms, includeGrouped)
 	if err != nil {
 		// Conservative fallback: pretend everything is fine so the caller
 		// returns 503 (we don't want to flip to 404 just because a lookup

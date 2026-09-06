@@ -81,11 +81,8 @@ func TestOpenAIRequestBodyLimitFailover_HTTP413SwitchesAccountsBeforeWrite(t *te
 			require.False(t, c.Writer.Written(), "account failover must happen before downstream output is committed")
 			require.Empty(t, rec.Body.String())
 			require.True(t, body.closed)
-			require.Equal(t, requestBody, []byte(`{"model":"gpt-5.2","stream":false,"input":"hello"}`), "the caller-owned request body must remain unchanged")
 			if passthrough {
-				require.Equal(t, "gpt-5.2", gjson.GetBytes(upstream.lastBody, "model").String())
-				require.Equal(t, "hello", gjson.GetBytes(upstream.lastBody, "input").String())
-				require.NotEmpty(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+				require.Equal(t, requestBody, upstream.lastBody)
 			} else {
 				require.Equal(t, "gpt-5.2", gjson.GetBytes(upstream.lastBody, "model").String())
 				require.Equal(t, "hello", gjson.GetBytes(upstream.lastBody, "input").String())

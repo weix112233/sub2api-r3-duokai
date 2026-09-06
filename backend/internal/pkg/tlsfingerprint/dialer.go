@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
 )
@@ -204,6 +205,8 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 		return nil, fmt.Errorf("connect to proxy: %w", err)
 	}
 	slog.Debug("tls_fingerprint_http_proxy_connected", "proxy_addr", proxyAddr)
+	stopCancellation := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancellation()
 
 	// Step 2: Send CONNECT request to establish tunnel
 	req := &http.Request{
@@ -224,6 +227,9 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	slog.Debug("tls_fingerprint_http_proxy_sending_connect", "target", addr)
 	if err := req.Write(conn); err != nil {
 		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		slog.Debug("tls_fingerprint_http_proxy_write_failed", "error", err)
 		return nil, fmt.Errorf("write CONNECT request: %w", err)
 	}
@@ -233,6 +239,9 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		slog.Debug("tls_fingerprint_http_proxy_read_response_failed", "error", err)
 		return nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
@@ -242,7 +251,7 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
 		slog.Debug("tls_fingerprint_http_proxy_connect_failed_status", "status_code", resp.StatusCode, "status", resp.Status)
-		return nil, fmt.Errorf("proxy CONNECT failed: %s", resp.Status)
+		return nil, &proxyutil.ConnectError{StatusCode: resp.StatusCode}
 	}
 	slog.Debug("tls_fingerprint_http_proxy_tunnel_established")
 

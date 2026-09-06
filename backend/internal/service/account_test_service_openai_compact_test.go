@@ -64,7 +64,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuthSuccessPersi
 	require.Equal(t, "chatgpt.com", upstream.lastReq.Host)
 	require.Equal(t, "text/event-stream", upstream.lastReq.Header.Get("Accept"))
 	require.Contains(t, upstream.lastReq.Header.Get("x-codex-beta-features"), "remote_compaction_v2")
-	require.Empty(t, upstream.lastReq.Header.Get("Session_Id"))
+	require.NotEmpty(t, upstream.lastReq.Header.Get("Session_Id"))
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
 	require.Equal(t, codexCLIUserAgent, upstream.lastReq.Header.Get("User-Agent"))
 	require.Equal(t, "chatgpt-acc", upstream.lastReq.Header.Get("chatgpt-account-id"))
@@ -265,11 +265,8 @@ func TestAccountTestService_TestAccountConnection_OpenAICompact2xxWithoutItemMar
 	require.Contains(t, rec.Body.String(), `"type":"error"`)
 }
 
-// 探测与真实转发走同一 /responses 端点，出站身份形状必须与真实流量同构。
-// r3 语义（fail-closed）：非 machine 模式下 applyCodexFingerprintHeaders 写入的
-// 收敛值（session-id / session_id / x-codex-installation-id 等）在终态
-// sanitizeCodexOutboundHeadersWithFingerprint 一律删除（探测无亲和上下文，
-// 也不做下划线回填）——与 r3 生产探测的出站形状一致：不带任何身份头。
+// 探测与真实转发走同一 /responses 端点，出站身份必须与真实 Codex 同构：
+// session/thread 为 UUID、携带 x-codex-installation-id（收敛账号用收敛值）。
 func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatchesRealTraffic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -286,8 +283,12 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatc
 			"access_token":       "oauth-token",
 			"chatgpt_account_id": "chatgpt-acc",
 		},
-		// 收敛是显式 opt-in（#5610），这里显式开启以验证探测身份与真实流量同构。
-		Extra: map[string]any{"codex_fingerprint_mode": "session"},
+		// 本基线缺省模式为 session（与上游 #5610 缺省 off 不同）；显式写出来以验证
+		// 探测身份与真实流量同构。
+		Extra: map[string]any{
+			"codex_fingerprint_mode":     "session",
+			codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
+		},
 	}
 	repo := &snapshotUpdateAccountRepo{
 		stubOpenAIAccountRepo: stubOpenAIAccountRepo{accounts: []Account{account}},
@@ -306,18 +307,24 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatc
 
 	require.NoError(t, svc.TestAccountConnection(c, account.ID, "gpt-5.4", "", AccountTestModeCompact))
 
-	require.Empty(t, upstream.lastReq.Header.Get("session-id"))
-	require.Empty(t, upstream.lastReq.Header.Get("session_id"))
-	require.Empty(t, upstream.lastReq.Header.Get("x-codex-installation-id"))
+	// 显式 session 收敛模式：出站身份 = 账号级收敛值
+	seed, ok := codexFingerprintSeed(account.Extra)
+	require.True(t, ok)
+	converged := resolveConvergedSessionID(seed)
+	require.Equal(t, converged, upstream.lastReq.Header.Get("session-id"))
+	require.Equal(t, converged, upstream.lastReq.Header.Get("session_id"))
+	require.Equal(t, resolveConvergedInstallationID(&account, seed), upstream.lastReq.Header.Get("x-codex-installation-id"),
+		"真实 Codex 每个请求必带 installation-id，探测不得缺失")
+	require.NotContains(t, upstream.lastReq.Header.Get("session-id"), "probe_compact",
+		"探测标识不得是可被上游一眼识别的字面量")
 	<-updateCalls
 }
 
 // machine 模式探测：出站头形态 = 真实 Codex 常规请求（codex-api/src/endpoint/responses.rs:87-93 +
 // core/src/client.rs:1186-1211）：连字符 session-id / thread-id / x-client-request-id（= thread）+
-// window "{thread}:{n}"，全部假名化；无下划线 Session_ID / Conversation_ID。顶层
-// x-codex-installation-id 移植形态不发送（真实 compact 分支会发，见 TEST-RECORD）。
-// body 身份构造与 machine sink 行为：prompt_cache_key + client_metadata（含内嵌 turn
-// metadata）先构造真实形态再整体假名化；终态 sanitizer 凭 staged IDs 保留签发假名。
+// window "{thread}:{n}"，全部假名化；无下划线 Session_ID / Conversation_ID。
+// native v2 body 同样先构造 prompt_cache_key + client_metadata（含内嵌 turn
+// metadata）的真实形态，再由 machine sink 整体假名化。
 func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -335,7 +342,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeI
 			"chatgpt_account_id": "chatgpt-acc",
 		},
 		Extra: map[string]any{
-			codexFingerprintModeExtraKey: "machine",
+			"codex_fingerprint_mode":     "machine",
 			codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
 		},
 	}
@@ -348,7 +355,11 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeI
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		Body:       io.NopCloser(strings.NewReader(compactProbeSSESuccessBody)),
 	}}
-	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
+	svc := &AccountTestService{
+		accountRepo:  repo,
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -364,7 +375,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeI
 	require.Equal(t, want, h.Get("x-client-request-id"), "真实 Codex x-client-request-id = thread")
 	require.Equal(t, want+":0", h.Get("x-codex-window-id"), "window = {thread}:{n} 形态且前段假名化")
 	require.NotEqual(t, probeID, want, "探测标识必须经假名化")
-	require.Empty(t, h.Get("x-codex-installation-id"), "移植形态顶层不发 installation 头")
 	require.Empty(t, h.Get("session_id"), "machine 不发下划线 session_id")
 	require.Empty(t, h.Get("conversation_id"))
 	for name, values := range h {
@@ -373,7 +383,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeI
 		}
 	}
 
-	// body 也是真实 compaction 形态（client.rs:921-938 恒设 prompt_cache_key + client_metadata；
+	// E(b)：body 也是真实 compaction 形态（client.rs:921-938 恒设 prompt_cache_key + client_metadata；
 	// responses_metadata.rs:278-315 / :357-386），且与头共用同一份 IDs 假名化。
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)

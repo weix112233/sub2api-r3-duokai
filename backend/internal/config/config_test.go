@@ -23,6 +23,13 @@ func resetViperWithJWTSecret(t *testing.T) {
 	t.Setenv("JWT_SECRET", strings.Repeat("x", 32))
 }
 
+func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, DefaultModelsListReadMaxBytes, cfg.Gateway.ModelsListReadMaxBytes)
+}
+
 func TestLoadTimezonePrecedence(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -188,6 +195,15 @@ func TestLoadForwardedClientIPHeadersFromEnvironment(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, []string{"X-Cdn-Ip", "True-Client-Ip"}, cfg.ForwardedClientIPSettings().Headers)
+}
+
+func TestLoadCorsAllowedOriginsFromEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("CORS_ALLOWED_ORIGINS", "http://127.0.0.1:18420, http://localhost:18420")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"http://127.0.0.1:18420", "http://localhost:18420"}, cfg.CORS.AllowedOrigins)
 }
 
 func TestLoadExplicitEmptyForwardedClientIPHeadersFromEnvironment(t *testing.T) {
@@ -457,8 +473,8 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	if !cfg.Gateway.OpenAIScheduler.StickyEscapeEnabled {
 		t.Fatalf("Gateway.OpenAIScheduler.StickyEscapeEnabled = false, want true")
 	}
-	if cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs != 60000 {
-		t.Fatalf("Gateway.OpenAIScheduler.StickyEscapeTTFTMs = %d, want 60000", cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs)
+	if cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs != 15000 {
+		t.Fatalf("Gateway.OpenAIScheduler.StickyEscapeTTFTMs = %d, want 15000", cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs)
 	}
 	if cfg.Gateway.OpenAIScheduler.StickyEscapeErrorRate != 0.5 {
 		t.Fatalf("Gateway.OpenAIScheduler.StickyEscapeErrorRate = %v, want 0.5", cfg.Gateway.OpenAIScheduler.StickyEscapeErrorRate)
@@ -551,6 +567,15 @@ func TestLoadOpenAIWSClientFirstMessageTimeoutFromEnv(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 120, cfg.Gateway.OpenAIWS.ClientFirstMessageTimeoutSeconds)
+}
+
+func TestLoadOpenAIWSForceHTTPFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_WS_FORCE_HTTP", "true")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.Gateway.OpenAIWS.ForceHTTP)
 }
 
 func TestLoadDefaultOpenAICompactModel(t *testing.T) {
@@ -1793,6 +1818,11 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway text body exceeds media body",
 			mutate:  func(c *Config) { c.Gateway.TextMaxBodySize = c.Gateway.MaxBodySize + 1 },
 			wantErr: "gateway.text_max_body_size",
+		},
+		{
+			name:    "gateway models list read limit",
+			mutate:  func(c *Config) { c.Gateway.ModelsListReadMaxBytes = 0 },
+			wantErr: "gateway.models_list_read_max_bytes",
 		},
 		{
 			name:    "gateway response header timeout",

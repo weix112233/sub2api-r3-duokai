@@ -3,6 +3,7 @@ package dto
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -68,10 +69,11 @@ func UserFromServiceAdmin(u *service.User) *AdminUser {
 		return nil
 	}
 	return &AdminUser{
-		User:       *base,
-		Notes:      u.Notes,
-		LastUsedAt: u.LastUsedAt,
-		GroupRates: u.GroupRates,
+		User:                 *base,
+		Notes:                u.Notes,
+		LastUsedAt:           u.LastUsedAt,
+		GroupRates:           u.GroupRates,
+		RestrictPublicGroups: u.RestrictPublicGroups,
 	}
 }
 
@@ -146,6 +148,8 @@ func GroupFromServiceAdmin(g *service.Group) *AdminGroup {
 	}
 	out := &AdminGroup{
 		Group:                       groupFromServiceBase(g),
+		ForceOpenAIFast:             g.ForceOpenAIFast,
+		FreeOpenAIFast:              g.FreeOpenAIFast,
 		ProfitControlEnabled:        g.ProfitControlEnabled,
 		ProfitMinMargin:             g.ProfitMinMargin,
 		ProfitSafetyBuffer:          g.ProfitSafetyBuffer,
@@ -219,6 +223,7 @@ func groupFromServiceBase(g *service.Group) Group {
 		RequirePrivacySet:               g.RequirePrivacySet,
 		RPMLimit:                        g.RPMLimit,
 		MaxReasoningEffort:              g.MaxReasoningEffort,
+		MaxReasoningEffortOverLimit:     g.MaxReasoningEffortOverLimit,
 		ReasoningEffortMappings:         g.ReasoningEffortMappings,
 		CreatedAt:                       g.CreatedAt,
 		UpdatedAt:                       g.UpdatedAt,
@@ -298,15 +303,6 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		if mode := a.GetUserMsgQueueMode(); mode != "" {
 			out.UserMsgQueueMode = &mode
 		}
-		// TLS指纹伪装开关
-		if a.IsTLSFingerprintEnabled() {
-			enabled := true
-			out.EnableTLSFingerprint = &enabled
-		}
-		// TLS指纹模板ID
-		if profileID := a.GetTLSFingerprintProfileID(); profileID > 0 {
-			out.TLSFingerprintProfileID = &profileID
-		}
 		// 会话ID伪装开关
 		if a.IsSessionIDMaskingEnabled() {
 			enabled := true
@@ -326,6 +322,17 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 			if customURL := a.GetCustomBaseURL(); customURL != "" {
 				out.CustomBaseURL = &customURL
 			}
+		}
+	}
+
+	// TLS fingerprinting also applies to OpenAI OAuth accounts. Always expose
+	// an explicit boolean for eligible accounts so edit forms can distinguish
+	// a persisted opt-out from a field omitted by an older mapper.
+	if a.IsTLSFingerprintEligible() {
+		enabled := a.IsTLSFingerprintEnabled()
+		out.EnableTLSFingerprint = &enabled
+		if profileID := a.GetTLSFingerprintProfileID(); profileID > 0 {
+			out.TLSFingerprintProfileID = &profileID
 		}
 	}
 
@@ -643,7 +650,7 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		RequestID:                 l.RequestID,
 		Model:                     requestedModel,
 		ServiceTier:               l.ServiceTier,
-		ReasoningEffort:           l.ReasoningEffort,
+		ReasoningEffort:           userFacingReasoningEffort(l),
 		InboundEndpoint:           l.InboundEndpoint,
 		GroupID:                   l.GroupID,
 		SubscriptionID:            l.SubscriptionID,
@@ -665,6 +672,7 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		RequestType:               requestType.String(),
 		Stream:                    stream,
 		OpenAIWSMode:              openAIWSMode,
+		NativeCompactionV2:        l.NativeCompactionV2,
 		DurationMs:                l.DurationMs,
 		FirstTokenMs:              l.FirstTokenMs,
 		ImageCount:                l.ImageCount,
@@ -710,18 +718,51 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 	usageLog := usageLogFromServiceUser(l)
 	usageLog.UpstreamEndpoint = l.UpstreamEndpoint
 	return &AdminUsageLog{
-		UsageLog:              usageLog,
-		UpstreamModel:         l.UpstreamModel,
-		UpstreamResponseModel: l.UpstreamResponseModel,
-		UpstreamModelMismatch: l.UpstreamModelMismatch,
-		ChannelID:             l.ChannelID,
-		ModelMappingChain:     l.ModelMappingChain,
-		BillingTier:           l.BillingTier,
-		AccountRateMultiplier: l.AccountRateMultiplier,
-		AccountStatsCost:      l.AccountStatsCost,
-		IPAddress:             l.IPAddress,
-		Account:               AccountSummaryFromService(l.Account),
+		UsageLog:                usageLog,
+		UpstreamModel:           l.UpstreamModel,
+		UpstreamReasoningEffort: adminUpstreamReasoningEffort(l),
+		UpstreamResponseModel:   l.UpstreamResponseModel,
+		UpstreamModelMismatch:   l.UpstreamModelMismatch,
+		ChannelID:               l.ChannelID,
+		ModelMappingChain:       l.ModelMappingChain,
+		BillingTier:             l.BillingTier,
+		AccountRateMultiplier:   l.AccountRateMultiplier,
+		AccountStatsCost:        l.AccountStatsCost,
+		IPAddress:               l.IPAddress,
+		Account:                 AccountSummaryFromService(l.Account),
 	}
+}
+
+func userFacingReasoningEffort(l *service.UsageLog) *string {
+	if l == nil {
+		return nil
+	}
+	if requested := strings.TrimSpace(derefString(l.RequestedReasoningEffort)); requested != "" {
+		return &requested
+	}
+	return l.ReasoningEffort
+}
+
+func adminUpstreamReasoningEffort(l *service.UsageLog) *string {
+	if l == nil {
+		return nil
+	}
+	forwarded := strings.TrimSpace(derefString(l.ReasoningEffort))
+	if forwarded == "" {
+		return nil
+	}
+	requested := userFacingReasoningEffort(l)
+	if requested != nil && service.NormalizeMaxReasoningEffort(*requested) == service.NormalizeMaxReasoningEffort(forwarded) {
+		return nil
+	}
+	return &forwarded
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func UsageCleanupTaskFromService(task *service.UsageCleanupTask) *UsageCleanupTask {

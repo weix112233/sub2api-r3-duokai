@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/antibypass"
 	coderws "github.com/coder/websocket"
 )
 
@@ -97,6 +100,32 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 	for {
 		select {
 		case result := <-readDone:
+			if result.err == nil {
+				detection, inspectionErr := antibypass.InspectFrame(controlCtx, result.payload)
+				if inspectionErr != nil || detection.Reason != antibypass.ReasonNone {
+					status := coderws.StatusPolicyViolation
+					code := "ANTI_BYPASS_PROMPT_BLOCKED"
+					if inspectionErr != nil {
+						status = coderws.StatusTryAgainLater
+						code = "ANTI_BYPASS_UNAVAILABLE"
+					} else if detection.Reason == antibypass.ReasonBodyTooLarge {
+						status = coderws.StatusMessageTooBig
+						code = "ANTI_BYPASS_BODY_TOO_LARGE"
+					}
+					slog.Warn("anti_bypass_ws_frame_blocked", "reason", detection.Reason, "code", code)
+					event, _ := json.Marshal(map[string]any{
+						"type": "error",
+						"error": map[string]any{"type": "invalid_request_error", "code": code,
+							"message": "WebSocket frame blocked by gateway security policy"},
+					})
+					writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = conn.Write(writeCtx, coderws.MessageText, event)
+					cancel()
+					_ = conn.Close(status, code)
+					_ = conn.CloseNow()
+					return 0, nil, NewOpenAIWSClientCloseError(status, code, inspectionErr)
+				}
+			}
 			return result.messageType, result.payload, result.err
 		case <-timeoutStart:
 			startTimeout()

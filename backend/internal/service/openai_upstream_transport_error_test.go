@@ -9,15 +9,17 @@ import (
 	"os"
 	"syscall"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestClassifyOpenAITransportError pins which transport-level upstream failures
+// TestClassifyUpstreamTransportError pins which transport-level upstream failures
 // are "persistent" (retrying the same proxy/account is pointless — evict + alert)
 // versus "transient" (a blip — fail over to a healthy account but do not evict).
 //
 // The motivating incident: a SOCKS5 proxy whose credentials expired returned
 // `username/password authentication failed`, yet the account kept being scheduled.
-func TestClassifyOpenAITransportError(t *testing.T) {
+func TestClassifyUpstreamTransportError(t *testing.T) {
 	cases := []struct {
 		name       string
 		err        error
@@ -26,6 +28,7 @@ func TestClassifyOpenAITransportError(t *testing.T) {
 		// Durable — config/credential/routing problems. Retrying same proxy won't help.
 		{"socks5 proxy credential rejected", errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": socks connect tcp 85.255.176.68:12324->chatgpt.com:443: username/password authentication failed`), true},
 		{"proxy connection refused", errors.New(`proxyconnect tcp: dial tcp 1.2.3.4:1080: connect: connection refused`), true},
+		{"proxy chain CONNECT 502", errors.New(`proxyconnect tcp: dial tcp 127.0.0.1:7896: 502 Bad Gateway`), true},
 		{"no route to host", errors.New(`dial tcp 1.2.3.4:443: connect: no route to host`), true},
 		{"dns resolution failure", errors.New(`dial tcp: lookup proxy.example.com: no such host`), true},
 		{"network unreachable", errors.New(`dial tcp 1.2.3.4:443: connect: network is unreachable`), true},
@@ -76,12 +79,27 @@ func TestClassifyOpenAITransportError(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyOpenAITransportError(tc.err).Persistent
+			got := classifyUpstreamTransportError(tc.err).Persistent
 			if got != tc.persistent {
-				t.Fatalf("classifyOpenAITransportError(%q).Persistent = %v, want %v", errString(tc.err), got, tc.persistent)
+				t.Fatalf("classifyUpstreamTransportError(%q).Persistent = %v, want %v", errString(tc.err), got, tc.persistent)
 			}
 		})
 	}
+}
+
+func TestIsOpenAIProxyChainTransportError(t *testing.T) {
+	require.True(t, isOpenAIProxyChainTransportError(errors.New(
+		`proxyconnect tcp: dial tcp 127.0.0.1:7896: 502 Bad Gateway`,
+	)))
+	require.True(t, isOpenAIProxyChainTransportError(errors.New(
+		`proxyconnect tcp: dial tcp 127.0.0.1:7896: 503 Service Unavailable`,
+	)))
+	require.False(t, isOpenAIProxyChainTransportError(errors.New(
+		`Post "https://chatgpt.com/": context deadline exceeded`,
+	)))
+	require.False(t, isOpenAIProxyChainTransportError(errors.New(
+		`upstream returned 502 Bad Gateway`,
+	)))
 }
 
 func errString(err error) string {

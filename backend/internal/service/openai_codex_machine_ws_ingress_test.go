@@ -426,8 +426,9 @@ func TestCodexMachineChain_WSIngress_Passthrough_TwoTurns(t *testing.T) {
 	assert.Equal(t, "resp_machine_pt_1", gjson.GetBytes(secondUpstream, "previous_response_id").String())
 }
 
-// off 模式：入口不 stage ⇒ 握手头与 payload 原样（回归保护：新增的 stage 只对 machine 生效）。
-func TestCodexMachineChain_WSIngress_OffModeUntouched(t *testing.T) {
+// off 模式：入口不 stage，不做本地指纹收敛；官方账号 namespace 仍对握手头和
+// payload 身份做凭据级隔离。
+func TestCodexMachineChain_WSIngress_OffModeUsesAccountNamespace(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 
@@ -470,17 +471,11 @@ func TestCodexMachineChain_WSIngress_OffModeUntouched(t *testing.T) {
 
 	handshake := dialer.headers()
 	require.NotNil(t, handshake)
-	// r3 fail-closed：WS 握手连字符身份头（客户端原值）终态删除，下划线
-	// session_id 以亲和隔离值恢复。
-	assert.Empty(t, handshake.Get("session-id"), "off 模式 WS 握手连字符会话头终态删除（r3 形状）")
-	assert.Empty(t, handshake.Get("thread-id"))
-	assert.Empty(t, handshake.Get("x-codex-window-id"))
-	assert.Empty(t, handshake.Get("x-codex-installation-id"))
-	assert.NotEmpty(t, handshake.Get("session_id"), "下划线 session_id 由亲和隔离值设置")
-	assert.NotEqual(t, root, handshake.Get("session_id"), "客户端原始会话标识不得出站")
-	// 帧内身份键 fail-closed 删除，pck 改写为 pcv2 网关键。
-	assert.False(t, gjson.GetBytes(firstUpstream, "client_metadata.session_id").Exists(), "帧内身份键终态删除")
-	outboundPck := gjson.GetBytes(firstUpstream, "prompt_cache_key").String()
-	assert.True(t, strings.HasPrefix(outboundPck, "pcv2-"), "pck 改写为 pcv2 网关键: %s", outboundPck)
-	assert.NotEqual(t, root, outboundPck, "原始客户端 cache key 不得出站")
+	assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "session", root), handshake.Get("session-id"))
+	assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "thread", root), handshake.Get("thread-id"))
+	assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "window", root+":0"), handshake.Get("x-codex-window-id"))
+	assert.Equal(t, scopeCodexAccountIdentityValue(account, 0, "installation", "real-install"), handshake.Get("x-codex-installation-id"))
+	wantSession := scopeCodexAccountIdentityValue(account, 0, "session", root)
+	assert.Equal(t, wantSession, gjson.GetBytes(firstUpstream, "client_metadata.session_id").String())
+	assert.Equal(t, wantSession, gjson.GetBytes(firstUpstream, "prompt_cache_key").String())
 }

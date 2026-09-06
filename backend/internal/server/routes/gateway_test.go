@@ -25,6 +25,14 @@ func newGatewayRoutesTestRouter(platform ...string) *gin.Engine {
 }
 
 func newGatewayRoutesTestRouterWithConfig(cfg *config.Config, platform ...string) *gin.Engine {
+	return newGatewayRoutesTestRouterWithAntiBypass(cfg, nil, platform...)
+}
+
+func newGatewayRoutesTestRouterWithAntiBypass(
+	cfg *config.Config,
+	antiBypass []servermiddleware.AntiBypassMiddleware,
+	platform ...string,
+) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 
@@ -53,9 +61,44 @@ func newGatewayRoutesTestRouterWithConfig(cfg *config.Config, platform ...string
 		nil,
 		nil,
 		cfg,
+		antiBypass...,
 	)
 
 	return router
+}
+
+func TestGatewayRoutesMountAntiBypassAfterAPIKeyAuthentication(t *testing.T) {
+	for _, path := range []string{
+		"/v1/messages",
+		"/responses",
+		"/backend-api/codex/responses",
+		"/antigravity/v1/messages",
+	} {
+		t.Run(path, func(t *testing.T) {
+			authenticated := false
+			antiBypass := servermiddleware.AntiBypassMiddleware(func(c *gin.Context) {
+				_, authenticated = servermiddleware.GetAPIKeyFromContext(c)
+				c.AbortWithStatus(http.StatusTeapot)
+			})
+			router := newGatewayRoutesTestRouterWithAntiBypass(
+				&config.Config{
+					Gateway: config.GatewayConfig{
+						MaxBodySize:     1024 * 1024,
+						TextMaxBodySize: 1024 * 1024,
+					},
+				},
+				[]servermiddleware.AntiBypassMiddleware{antiBypass},
+			)
+
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-5"}`))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+
+			require.Equal(t, http.StatusTeapot, recorder.Code)
+			require.True(t, authenticated, "anti-bypass must run after API key authentication")
+		})
+	}
 }
 
 func TestGatewayRoutesOpenAIResponsesCompactPathIsRegistered(t *testing.T) {
@@ -94,7 +137,7 @@ func TestGatewayRoutesOpenAIAlphaSearchPathsAreRegistered(t *testing.T) {
 	}
 }
 
-func TestGatewayRoutesAlphaSearchRejectsNonOpenAIGroup(t *testing.T) {
+func TestGatewayRoutesAlphaSearchRejectsUnsupportedGroup(t *testing.T) {
 	router := newGatewayRoutesTestRouter(service.PlatformGrok)
 	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5.6-sol"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -103,7 +146,7 @@ func TestGatewayRoutesAlphaSearchRejectsNonOpenAIGroup(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusNotFound, w.Code)
-	require.Contains(t, w.Body.String(), "only available for OpenAI groups")
+	require.Contains(t, w.Body.String(), "only available for OpenAI and Composite groups")
 }
 
 func TestGatewayRoutesOpenAIImagesPathsAreRegistered(t *testing.T) {
@@ -343,6 +386,18 @@ func TestGatewayRoutesNonGrokVideosAreRejectedAtPlatformGate(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, w.Code, "method=%s path=%s", tc.method, tc.path)
 		require.Contains(t, w.Body.String(), "Videos API is not supported for this platform")
 	}
+}
+
+func TestGatewayRoutesCompositeVideoGenerationAllowed(t *testing.T) {
+	router := newGatewayRoutesTestRouter(service.PlatformComposite)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos/generations", strings.NewReader(`{"model":"grok-imagine-video-1.5","prompt":"waves"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+	require.NotContains(t, w.Body.String(), "not supported")
 }
 
 func TestGatewayRoutesCompositeOpenAIOnlyEndpointsRequireOpenAITarget(t *testing.T) {

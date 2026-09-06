@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/antibypass"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/google/wire"
 )
@@ -17,12 +19,19 @@ type AdminAuthMiddleware gin.HandlerFunc
 // APIKeyAuthMiddleware API Key 认证中间件类型
 type APIKeyAuthMiddleware gin.HandlerFunc
 
+func ProvideAntiBypassSettings(settings *service.SettingService) AntiBypassSettings {
+	return settings
+}
+
 // ProviderSet 中间件层的依赖注入
 var ProviderSet = wire.NewSet(
 	NewJWTAuthMiddleware,
 	NewOptionalJWTAuthMiddleware,
 	NewAdminAuthMiddleware,
 	NewAPIKeyAuthMiddleware,
+	antibypass.NewGuard,
+	ProvideAntiBypassSettings,
+	NewAntiBypassMiddleware,
 	NewAuditLogMiddleware,
 	NewStepUpAuthMiddleware,
 )

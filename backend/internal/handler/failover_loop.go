@@ -56,7 +56,13 @@ const (
 const profitVetoExhaustedMessage = "No available accounts: all candidates rejected by group profit control"
 
 func sameAccountRetryDelayFor(failoverErr *service.UpstreamFailoverError, retryCount int) time.Duration {
-	if failoverErr == nil || !failoverErr.RequestScopedTransient || retryCount <= 1 {
+	if failoverErr == nil {
+		return sameAccountRetryDelay
+	}
+	if failoverErr.SameAccountRetryDelay > 0 {
+		return failoverErr.SameAccountRetryDelay
+	}
+	if !failoverErr.RequestScopedTransient || retryCount <= 1 {
 		return sameAccountRetryDelay
 	}
 
@@ -68,6 +74,64 @@ func sameAccountRetryDelayFor(failoverErr *service.UpstreamFailoverError, retryC
 		delay *= 2
 	}
 	return delay
+}
+
+func retrySameAccountAllowed(platform string, failoverErr *service.UpstreamFailoverError) bool {
+	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
+		return false
+	}
+	// A generic OpenAI pool 429 is an account/pool quota signal, not a
+	// request-local transient. OAuth 429 handling may opt into one bounded
+	// retry window by attaching a deadline derived from the upstream signal.
+	if platform == service.PlatformOpenAI && failoverErr.StatusCode == http.StatusTooManyRequests {
+		return !failoverErr.SameAccountRetryDeadline.IsZero()
+	}
+	return true
+}
+
+func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCount, retryLimit int) bool {
+	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
+		return false
+	}
+	if !sameAccountRetryDeadlineAllows(failoverErr) {
+		return false
+	}
+	// Error-specific caps (Grok capacity/stream-idle) remain hard limits even
+	// when the error also carries a freshly reconstructed deadline.
+	if failoverErr.SameAccountRetryMax > 0 {
+		if retryLimit <= 0 {
+			return false
+		}
+		if failoverErr.SameAccountRetryMax < retryLimit {
+			retryLimit = failoverErr.SameAccountRetryMax
+		}
+		return retryCount < retryLimit
+	}
+	// OAuth 429 explicitly opts into a deadline window. It is intentionally not
+	// bounded by the ordinary/default pool retry count.
+	if !failoverErr.SameAccountRetryDeadline.IsZero() {
+		return true
+	}
+	return retryLimit > 0 && retryCount < retryLimit
+}
+
+// sameAccountRetryDeadlineAllows prevents a retry from starting after the
+// service-provided same-account retry window has elapsed.
+func sameAccountRetryDeadlineAllows(failoverErr *service.UpstreamFailoverError) bool {
+	return failoverErr == nil || failoverErr.SameAccountRetryDeadline.IsZero() || time.Now().Before(failoverErr.SameAccountRetryDeadline)
+}
+
+// effectiveSameAccountRetryLimit applies an error-specific cap without
+// overriding an explicit account setting of zero (which disables retries).
+func effectiveSameAccountRetryLimit(failoverErr *service.UpstreamFailoverError, account *service.Account) int {
+	if account == nil {
+		return 0
+	}
+	limit := account.GetPoolModeRetryCount()
+	if limit > 0 && failoverErr != nil && failoverErr.SameAccountRetryMax > 0 && failoverErr.SameAccountRetryMax < limit {
+		return failoverErr.SameAccountRetryMax
+	}
+	return limit
 }
 
 // FailoverState 跨循环迭代共享的 failover 状态
@@ -158,14 +222,16 @@ func (s *FailoverState) HandleFailoverError(
 	}
 
 	// 同账号重试不算切换账号，粘性会话仅在实际切换时强制缓存计费。
-	sameAccountRetry := failoverErr.RetryableOnSameAccount && s.SameAccountRetryCount[accountID] < retryLimit
+	retryCount := s.SameAccountRetryCount[accountID]
+	sameAccountRetry := retrySameAccountAllowed(platform, failoverErr) &&
+		sameAccountRetryAllowed(failoverErr, retryCount, retryLimit)
 	if needForceCacheBilling(s.hasBoundSession, failoverErr, sameAccountRetry) {
 		s.ForceCacheBilling = true
 	}
 
 	// 同账号重试：对 RetryableOnSameAccount 的临时性错误，先在同一账号上重试。
 	// 重试次数上限 retryLimit 由调用方传入（账号级 pool_mode_retry_count 配置）。
-	if failoverErr.RetryableOnSameAccount && s.SameAccountRetryCount[accountID] < retryLimit {
+	if sameAccountRetry {
 		s.SameAccountRetryCount[accountID]++
 		retryDelay := sameAccountRetryDelayFor(failoverErr, s.SameAccountRetryCount[accountID])
 		logger.FromContext(ctx).Warn("gateway.failover_same_account_retry",
@@ -181,24 +247,8 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverContinue
 	}
 
-	// Request-scoped capacity shedding is independent of the selected account.
-	// Once the bounded same-account retry budget is exhausted, switching through
-	// the pool only replays the same request and can trigger needless reconnects
-	// and cache fragmentation.
-	if failoverErr.RequestScopedTransient {
-		logger.FromContext(ctx).Warn("gateway.failover_request_scoped_retry_exhausted",
-			zap.Int64("account_id", accountID),
-			zap.Int("same_account_retry_count", s.SameAccountRetryCount[accountID]),
-			zap.Int("same_account_retry_max", retryLimit),
-			zap.Int("upstream_status", failoverErr.StatusCode),
-		)
-		return FailoverExhausted
-	}
-
-	// 同账号重试用尽，执行临时封禁
-	if failoverErr.RetryableOnSameAccount {
-		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
-	}
+	// 同账号重试用尽，执行统一终态处置。
+	applyRetryExhaustedDisposition(ctx, gatewayService, accountID, failoverErr)
 
 	// 加入失败列表
 	s.FailedAccountIDs[accountID] = struct{}{}
@@ -226,6 +276,18 @@ func (s *FailoverState) HandleFailoverError(
 	}
 
 	return FailoverContinue
+}
+
+func applyRetryExhaustedDisposition(
+	ctx context.Context,
+	gatewayService TempUnscheduler,
+	accountID int64,
+	failoverErr *service.UpstreamFailoverError,
+) {
+	if failoverErr == nil || !failoverErr.RetryableOnSameAccount || gatewayService == nil {
+		return
+	}
+	gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 }
 
 // HandleSelectionExhausted 处理选号失败（所有候选账号都在排除列表中）时的退避重试决策。

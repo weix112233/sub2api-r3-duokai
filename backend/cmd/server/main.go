@@ -37,26 +37,6 @@ var (
 	BuildType = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
 )
 
-const (
-	defaultServerShutdownTimeout = 55 * time.Minute
-	maxServerShutdownTimeout     = 2 * time.Hour
-)
-
-func serverShutdownTimeout() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("SERVER_SHUTDOWN_TIMEOUT"))
-	if raw == "" {
-		return defaultServerShutdownTimeout
-	}
-	timeout, err := time.ParseDuration(raw)
-	if err != nil || timeout < 5*time.Second {
-		return defaultServerShutdownTimeout
-	}
-	if timeout > maxServerShutdownTimeout {
-		return maxServerShutdownTimeout
-	}
-	return timeout
-}
-
 func init() {
 	// 如果 Version 已通过 ldflags 注入（例如 -X main.Version=...），则不要覆盖。
 	if strings.TrimSpace(Version) != "" {
@@ -173,6 +153,11 @@ func runMainServer() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 	defer app.Cleanup()
+	if app.PluginManager != nil {
+		if err := app.PluginManager.Start(context.Background()); err != nil {
+			log.Printf("Plugin manager started in degraded state: %v", err)
+		}
+	}
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
@@ -199,7 +184,7 @@ func runMainServer() {
 
 	log.Println("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := app.Server.Shutdown(ctx); err != nil {

@@ -15,7 +15,7 @@ func requireOpenAICodexProbeHeaders(t *testing.T, h http.Header) {
 	require.Equal(t, openai.CodexDefaultOriginator, h.Get("Originator"))
 	require.Equal(t, codexCLIVersion, h.Get("Version"))
 	require.Equal(t, "responses=experimental", h.Get("OpenAI-Beta"))
-	require.Empty(t, h.Get("X-Codex-Window-ID"))
+	require.NotEmpty(t, h.Get("X-Codex-Window-ID"))
 }
 
 // 强制统一出口：无论客户端自报什么身份，OAuth 出站的 User-Agent / originator / version
@@ -321,4 +321,28 @@ func TestBuildCodexCLIUserAgent(t *testing.T) {
 	// 非法版本号必须回退到内置 UA，不能拼出畸形身份。
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent("bogus version"))
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent(""))
+}
+
+func TestCodexCanonicalUserAgentFollowsResolver(t *testing.T) {
+	SetCodexCanonicalUserAgentResolver(func() string {
+		return "codex_cli_rs/0.200.1" + codexCLIUserAgentSuffix
+	})
+	t.Cleanup(func() { SetCodexCanonicalUserAgentResolver(nil) })
+
+	require.Equal(t, "codex_cli_rs/0.200.1"+codexCLIUserAgentSuffix, CodexCanonicalUserAgent())
+	require.Equal(t, "0.200.1", CodexCanonicalClientVersion())
+
+	h := make(http.Header)
+	ApplyCodexCanonicalAuthIdentity(h)
+	require.Equal(t, "codex_cli_rs", h.Get("originator"))
+	require.Equal(t, "codex_cli_rs/0.200.1"+codexCLIUserAgentSuffix, h.Get("user-agent"))
+	// 凭据面不发 version 头（真实客户端在 auth.openai.com 只带 originator + UA）。
+	require.Empty(t, h.Get("version"))
+}
+
+func TestCodexCanonicalUserAgentFallsBackWithoutResolver(t *testing.T) {
+	SetCodexCanonicalUserAgentResolver(nil)
+
+	require.Equal(t, codexCLIUserAgent, CodexCanonicalUserAgent())
+	require.Equal(t, codexCLIVersion, CodexCanonicalClientVersion())
 }

@@ -32,7 +32,7 @@ func stageCodexFingerprintIDs(c *gin.Context, ids *codexFingerprintIDs) {
 }
 
 func stagedCodexFingerprintIDs(c *gin.Context, account *Account) *codexFingerprintIDs {
-	if c == nil || account == nil || account.Type != AccountTypeOAuth {
+	if c == nil || account == nil || !account.UsesOpenAICodexProtocol() {
 		return nil
 	}
 	value, ok := c.Get(codexFingerprintIDsContextKey)
@@ -44,13 +44,6 @@ func stagedCodexFingerprintIDs(c *gin.Context, account *Account) *codexFingerpri
 		return nil
 	}
 	return ids
-}
-
-// stagedCodexFingerprintIDsForAccount 是 sanitizer/终态出站侧使用的读取别名：
-// 与 stagedCodexFingerprintIDs 同一语义（仅本 attempt 解析快照的账号可读），
-// 防止 stale context 跨账号 failover 时把上一账号的网关产物误判保留。
-func stagedCodexFingerprintIDsForAccount(c *gin.Context, account *Account) *codexFingerprintIDs {
-	return stagedCodexFingerprintIDs(c, account)
 }
 
 // applyStagedCodexFingerprintHeaders 读取 context 暂存的收敛 ID 并改写出站头。
@@ -134,7 +127,6 @@ type codexFingerprintMode string
 
 const (
 	// codexFingerprintOff 不做任何收敛，原样透传客户端标识。
-	// 默认模式为 session；只有显式设置 "off" 才关闭收敛。
 	codexFingerprintOff codexFingerprintMode = "off"
 	// codexFingerprintDevice 仅收敛 installation_id 为账号级恒定值。
 	// 上游看到 1 台设备 + 多会话（每用户各自的 session）。
@@ -187,7 +179,7 @@ func stripCodexFingerprintSeed(extra map[string]any) map[string]any {
 
 // codexFingerprintModeFromExtra 只认 extra 里显式写入的模式（未设置/非法 ⇒ off）。
 // 供 seed 管理辅助函数使用：是否铸造/保留 seed 以显式 opt-in 为准；
-// 运行时生效模式见 GetCodexFingerprintMode（本基线缺省 session，保持既有行为）。
+// 运行时生效模式见 GetCodexFingerprintMode（本基线缺省 machine）。
 func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 	if extra == nil {
 		return codexFingerprintOff
@@ -219,7 +211,9 @@ func codexFingerprintSeed(extra map[string]any) (string, bool) {
 
 func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra map[string]any) map[string]any {
 	prepared := stripCodexFingerprintSeed(extra)
-	if platform != PlatformOpenAI || accountType != AccountTypeOAuth || !codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
+	if platform != PlatformOpenAI ||
+		(accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken) ||
+		!codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
 		return prepared
 	}
 	if prepared == nil {
@@ -231,7 +225,7 @@ func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra m
 
 func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]any) map[string]any {
 	prepared := stripCodexFingerprintSeed(extra)
-	if account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
+	if account == nil || !account.IsOpenAIOAuthLike() {
 		return prepared
 	}
 	if seed, ok := codexFingerprintSeed(account.Extra); ok {
@@ -270,11 +264,9 @@ func ShouldEnsureCodexFingerprintSeedForExtraUpdates(updates map[string]any) boo
 }
 
 // GetCodexFingerprintMode 从账号 extra JSON 读取指纹收敛模式。
-// 未设置或非法时默认 session（设备+会话）；显式 off/device/full/machine 仍保留。
-// 本基线与上游 main 的差异：上游 #5610 改为缺省 off（显式 opt-in），本生产基线
-// 一直以 session 为缺省并按此运行，保持现状不动（本次移植只新增 machine 选项）。
+// 未设置或非法时默认 machine（单机多窗口）；显式 off/device/session/full 仍保留。
 func (a *Account) GetCodexFingerprintMode() codexFingerprintMode {
-	if a == nil || !a.IsOpenAIOAuth() {
+	if a == nil || !a.IsOpenAIOAuthLike() {
 		return codexFingerprintOff
 	}
 	raw := strings.TrimSpace(a.GetExtraString(codexFingerprintModeExtraKey))
@@ -282,7 +274,10 @@ func (a *Account) GetCodexFingerprintMode() codexFingerprintMode {
 	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
 		return codexFingerprintMode(raw)
 	default:
-		return codexFingerprintSession
+		if a.Type == AccountTypeSetupToken {
+			return codexFingerprintOff
+		}
+		return codexFingerprintMachine
 	}
 }
 
@@ -321,7 +316,7 @@ func NormalizeOpenAICodexFingerprintExtraForCreate(account *Account) {
 			return
 		}
 	}
-	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintSession)
+	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintMachine)
 	ensureCodexFingerprintSeedForCreate(account)
 }
 
@@ -338,8 +333,8 @@ func ensureCodexFingerprintSeedForCreate(account *Account) {
 }
 
 // normalizeOpenAICodexFingerprintExtraForUpdate keeps an existing explicit
-// mode when an edit payload omits the default field. This covers partial
-// updates used by bulk/import and re-auth flows.
+// mode when an edit payload omits the default field. This is important for
+// bulk/import callers that submit a partial extra object.
 func normalizeOpenAICodexFingerprintExtraForUpdate(
 	account *Account,
 	extra map[string]any,
@@ -352,19 +347,19 @@ func normalizeOpenAICodexFingerprintExtraForUpdate(
 	if extra == nil {
 		extra = make(map[string]any, 1)
 	}
-	if rawValue, ok := extra[codexFingerprintModeExtraKey]; ok {
-		raw, isString := rawValue.(string)
+	if _, ok := extra[codexFingerprintModeExtraKey]; ok {
+		raw, isString := extra[codexFingerprintModeExtraKey].(string)
 		switch codexFingerprintMode(strings.TrimSpace(raw)) {
 		case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
 			if isString && strings.TrimSpace(raw) != "" {
 				return extra
 			}
 		}
-		extra[codexFingerprintModeExtraKey] = string(codexFingerprintSession)
+		extra[codexFingerprintModeExtraKey] = string(codexFingerprintMachine)
 		return extra
 	}
 
-	mode := codexFingerprintSession
+	mode := codexFingerprintMachine
 	if previousWasOpenAIOAuth {
 		switch previousMode {
 		case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:

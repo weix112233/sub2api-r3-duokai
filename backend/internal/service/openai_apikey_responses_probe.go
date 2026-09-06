@@ -119,7 +119,29 @@ func (s *AccountTestService) ProbeOpenAIAPIKeyResponsesSupport(ctx context.Conte
 		logger.LegacyPrintf("service.openai_probe", "probe_load_account_failed: account_id=%d err=%v", accountID, err)
 		return
 	}
-	if account.Platform != PlatformOpenAI || account.Type != AccountTypeAPIKey {
+	if account.Type != AccountTypeAPIKey {
+		return
+	}
+	if account.IsCNProvider() {
+		// 国产 OpenAI 兼容上游默认仅支持 /v1/chat/completions。直接落标 false
+		// 走 Chat Completions 直转，跳过网络探测。
+		// 例外：deepseek / kimi 的固定 responses 和 adaptive 账号使用官方原生
+		// Responses 端点，落标 force_responses；其余协议显式重置为 auto，避免
+		// 切换后残留强制模式。
+		if account.UsesNativeCNResponses() {
+			_ = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+				openai_compat.ExtraKeyResponsesMode:      string(openai_compat.ResponsesSupportModeForceResponses),
+				openai_compat.ExtraKeyResponsesSupported: true,
+			})
+			return
+		}
+		_ = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			openai_compat.ExtraKeyResponsesMode:      string(openai_compat.ResponsesSupportModeAuto),
+			openai_compat.ExtraKeyResponsesSupported: false,
+		})
+		return
+	}
+	if account.Platform != PlatformOpenAI {
 		// 仅 OpenAI APIKey 账号需要探测；其他账号类型无能力差异。
 		return
 	}
@@ -158,7 +180,6 @@ func (s *AccountTestService) ProbeOpenAIAPIKeyResponsesSupport(ctx context.Conte
 
 	// 账号级请求头覆写：能力探测与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
-	sanitizeCodexOutboundHeaders(req.Header)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

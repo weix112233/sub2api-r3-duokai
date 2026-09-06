@@ -941,123 +941,6 @@ func (s *AccountRepoSuite) TestClearRateLimitIfObservedProtectsRearmed429Generat
 	s.Require().WithinDuration(rearmedReset, *retyped.RateLimitResetAt, time.Second)
 }
 
-func (s *AccountRepoSuite) TestClearOpenAIRateLimitIfObservedProtectsRearmedGeneration() {
-	account := mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "acc-openai-rl-conditional-clear",
-		Platform: service.PlatformOpenAI,
-		Type:     service.AccountTypeOAuth,
-		Extra: map[string]any{
-			"model_rate_limits": map[string]any{
-				"gpt-5": map[string]any{
-					"rate_limit_reset_at": "2026-08-15T23:59:00Z",
-				},
-			},
-		},
-	})
-	firstReset := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
-	rearmedReset := time.Now().Add(5 * time.Minute).UTC().Truncate(time.Second)
-	cacheRecorder := &schedulerCacheRecorder{}
-	s.repo.schedulerCache = cacheRecorder
-
-	s.Require().NoError(s.repo.SetRateLimitedIfLater(s.ctx, account.ID, firstReset))
-	_, err := s.repo.sql.ExecContext(s.ctx, "TRUNCATE scheduler_outbox")
-	s.Require().NoError(err)
-	staleGeneration, err := s.repo.GetByID(s.ctx, account.ID)
-	s.Require().NoError(err)
-	s.Require().NotNil(staleGeneration.RateLimitedAt)
-	s.Require().NotNil(staleGeneration.RateLimitResetAt)
-
-	cleared, err := s.repo.ClearOpenAIRateLimitIfObserved(
-		s.ctx,
-		account.ID,
-		*staleGeneration.RateLimitedAt,
-		*staleGeneration.RateLimitResetAt,
-	)
-	s.Require().NoError(err)
-	s.Require().True(cleared)
-
-	var outboxCount int
-	s.Require().NoError(scanSingleRow(
-		s.ctx,
-		s.repo.sql,
-		"SELECT COUNT(*) FROM scheduler_outbox WHERE event_type = $1 AND account_id = $2",
-		[]any{service.SchedulerOutboxEventAccountChanged, account.ID},
-		&outboxCount,
-	))
-	s.Require().Equal(1, outboxCount)
-	got, err := s.repo.GetByID(s.ctx, account.ID)
-	s.Require().NoError(err)
-	s.Require().Nil(got.RateLimitedAt)
-	s.Require().Nil(got.RateLimitResetAt)
-	s.Require().Contains(got.Extra, "model_rate_limits")
-	s.Require().Len(cacheRecorder.setAccounts, 1)
-	s.Require().Nil(cacheRecorder.setAccounts[0].RateLimitedAt)
-	s.Require().Contains(cacheRecorder.setAccounts[0].Extra, "model_rate_limits")
-
-	_, err = s.repo.sql.ExecContext(s.ctx, "TRUNCATE scheduler_outbox")
-	s.Require().NoError(err)
-	s.Require().NoError(s.repo.SetRateLimitedIfLater(s.ctx, account.ID, rearmedReset))
-	cleared, err = s.repo.ClearOpenAIRateLimitIfObserved(
-		s.ctx,
-		account.ID,
-		*staleGeneration.RateLimitedAt,
-		*staleGeneration.RateLimitResetAt,
-	)
-	s.Require().NoError(err)
-	s.Require().False(cleared)
-
-	got, err = s.repo.GetByID(s.ctx, account.ID)
-	s.Require().NoError(err)
-	s.Require().NotNil(got.RateLimitedAt)
-	s.Require().NotNil(got.RateLimitResetAt)
-	s.Require().WithinDuration(rearmedReset, *got.RateLimitResetAt, time.Second)
-}
-
-func TestClearOpenAIRateLimitIfObservedRollsBackWhenOutboxInsertFails(t *testing.T) {
-	client := testEntClient(t)
-	account := mustCreateAccount(t, client, &service.Account{
-		Name:     "acc-openai-rl-atomic-outbox-failure",
-		Platform: service.PlatformOpenAI,
-		Type:     service.AccountTypeOAuth,
-	})
-	t.Cleanup(func() {
-		_, _ = integrationDB.ExecContext(context.Background(), "DELETE FROM scheduler_outbox WHERE account_id = $1", account.ID)
-		_ = client.Account.DeleteOneID(account.ID).Exec(context.Background())
-	})
-
-	seedRepo := newAccountRepositoryWithSQL(client, integrationDB, nil)
-	resetAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, seedRepo.SetRateLimitedIfLater(context.Background(), account.ID, resetAt))
-	_, err := integrationDB.ExecContext(context.Background(), "DELETE FROM scheduler_outbox WHERE account_id = $1", account.ID)
-	require.NoError(t, err)
-	observed, err := seedRepo.GetByID(context.Background(), account.ID)
-	require.NoError(t, err)
-	require.NotNil(t, observed.RateLimitedAt)
-	require.NotNil(t, observed.RateLimitResetAt)
-
-	repo := newAccountRepositoryWithSQL(client, &failAtomicSchedulerOutboxSQLExecutor{sqlExecutor: integrationDB}, nil)
-	cleared, err := repo.ClearOpenAIRateLimitIfObserved(
-		context.Background(),
-		account.ID,
-		*observed.RateLimitedAt,
-		*observed.RateLimitResetAt,
-	)
-
-	require.Error(t, err)
-	require.False(t, cleared)
-	after, err := seedRepo.GetByID(context.Background(), account.ID)
-	require.NoError(t, err)
-	require.NotNil(t, after.RateLimitedAt)
-	require.NotNil(t, after.RateLimitResetAt)
-	var outboxCount int
-	require.NoError(t, integrationDB.QueryRowContext(
-		context.Background(),
-		"SELECT COUNT(*) FROM scheduler_outbox WHERE account_id = $1",
-		account.ID,
-	).Scan(&outboxCount))
-	require.Zero(t, outboxCount)
-}
-
 func (s *AccountRepoSuite) TestClearRateLimit() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-clear"})
 	until := time.Now().Add(1 * time.Hour)
@@ -1071,6 +954,53 @@ func (s *AccountRepoSuite) TestClearRateLimit() {
 	s.Require().Nil(got.RateLimitedAt)
 	s.Require().Nil(got.RateLimitResetAt)
 	s.Require().Nil(got.OverloadUntil)
+}
+
+func (s *AccountRepoSuite) TestResetQuotaUsedAndClearRateLimitCooldownPreservesOtherRuntimeState() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name: "acc-reset-quota-cooldown",
+		Extra: map[string]any{
+			"quota_used":        12.5,
+			"quota_daily_used":  5.0,
+			"quota_weekly_used": 9.0,
+			"model_rate_limits": map[string]any{
+				"claude-sonnet-4-5": map[string]any{"rate_limit_reset_at": "2026-09-01T10:00:00Z"},
+			},
+		},
+	})
+	until := time.Now().Add(1 * time.Hour)
+	s.Require().NoError(s.repo.SetOverloaded(s.ctx, account.ID, until))
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, until))
+	s.Require().NoError(s.repo.SetTempUnschedulable(s.ctx, account.ID, until, "preserve-me"))
+
+	cacheRecorder := &schedulerCacheRecorder{}
+	s.repo.schedulerCache = cacheRecorder
+
+	s.Require().NoError(s.repo.ResetQuotaUsedAndClearRateLimitCooldown(s.ctx, account.ID))
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Nil(got.RateLimitedAt)
+	s.Require().Nil(got.RateLimitResetAt)
+	s.Require().NotNil(got.OverloadUntil)
+	s.Require().WithinDuration(until, *got.OverloadUntil, time.Second)
+	s.Require().NotNil(got.TempUnschedulableUntil)
+	s.Require().WithinDuration(until, *got.TempUnschedulableUntil, time.Second)
+	s.Require().Equal("preserve-me", got.TempUnschedulableReason)
+	s.Require().Contains(got.Extra, "model_rate_limits")
+	s.Require().Equal(float64(0), got.Extra["quota_used"])
+	s.Require().Equal(float64(0), got.Extra["quota_daily_used"])
+	s.Require().Equal(float64(0), got.Extra["quota_weekly_used"])
+
+	var pendingEventExists bool
+	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql, `
+		SELECT EXISTS (
+			SELECT 1 FROM scheduler_outbox
+			WHERE event_type = $1 AND account_id = $2 AND dedup_key IS NOT NULL
+		)`, []any{service.SchedulerOutboxEventAccountChanged, account.ID}, &pendingEventExists))
+	s.Require().True(pendingEventExists)
+	s.Require().Len(cacheRecorder.setAccounts, 1)
+	s.Require().Equal(account.ID, cacheRecorder.setAccounts[0].ID)
 }
 
 func (s *AccountRepoSuite) TestTempUnschedulableFieldsLoadedByGetByIDAndGetByIDs() {

@@ -26,11 +26,9 @@ import (
 
 // --- Codex OAuth machine 模式：真实 handler failover 循环下的 I2（无残留）用例 ---
 // 走 h.Responses → SelectAccountWithSchedulerForCapability → Forward 的真实选号/切换循环：
-// 首选 machine 账号上游 5xx 触发 failover，切到 off 账号后按 r3 fail-closed 语义清洗
-// （全删连字符身份头 + 亲和隔离值回填 + client_metadata 清空 + pcv2 缓存键），
-// 不得残留上一账号的假名，也不透传真实值（service 层 TestCodexMachineChain_Failover_I2_
-// NoResidualIDs 是手工 stage，此处补真实循环；off 段断言已从 qiyan 无-sanitizer 语义
-// 适配为 r3 生产语义）。
+// 首选 machine 账号上游 5xx 触发 failover，切到 off 账号后出站头与 body 必须是真实值，
+// 不得残留上一账号的假名（service 层 TestCodexMachineChain_Failover_I2_NoResidualIDs 是手工
+// stage，此处补真实循环）。
 
 const (
 	machineFailoverRoot = "01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a" // UUIDv7
@@ -214,40 +212,21 @@ func TestResponsesFailover_CodexMachineToOff_NoResidualIDs(t *testing.T) {
 		}
 	}
 
-	// attempt 2（off）：r3 fail-closed 语义 —— 终态 sanitizer 删除全部连字符身份头，
-	// 亲和 isolate 值（从原始客户端 root 派生、与 machine 假名无关）回填下划线
-	// session_id/conversation_id；body 的 client_metadata 清空、prompt_cache_key 重派
-	// pcv2 网关键。既不得残留 attempt 1 的假名，也不得透传真实值。
-	// （qiyan 原版断言 off 段透传真实 window/installation/tm——那是无 sanitizer 世界的
-	// 语义，r3 世界 off 账号的出站形状以终态清洗为准，此处按 r3 生产形状适配。）
+	// attempt 2（off）：HEAD 既有白名单键真实值原样、会话身份头维持 HEAD 行为（不放行），且不得残留 attempt 1 的假名
 	h2, b2 := headers[1], string(bodies[1])
-	require.Empty(t, h2.Get("session-id"), "off 账号不放行连字符会话头（r3 fail-closed）")
+	require.Empty(t, h2.Get("session-id"), "off 账号不放行连字符会话头（HEAD 行为）")
 	require.Empty(t, h2.Get("thread-id"))
 	require.Empty(t, h2.Get("x-client-request-id"))
-	require.Empty(t, h2.Get("x-codex-window-id"), "off 账号终态清洗删除窗口头（r3 语义）")
-	require.Empty(t, h2.Get("x-codex-installation-id"))
-	require.Empty(t, h2.Get("x-codex-turn-metadata"))
-
-	// 亲和隔离值：Session_id 与 Conversation_id 相同、16-hex、既非真实 root 也非 machine 假名
-	affinity := h2.Get("Session_id")
-	require.NotEmpty(t, affinity, "off OAuth 账号必须绑定亲和隔离会话（r3 语义）")
-	require.Equal(t, affinity, h2.Get("Conversation_id"))
-	require.Regexp(t, `^[0-9a-f]{16}$`, affinity)
-	require.NotEqual(t, root, affinity)
-	require.NotEqual(t, p, affinity)
-
-	// body：client_metadata 清空（envelope 级清洗）、pck 为 pcv2 网关键
-	cm := gjson.Get(b2, "client_metadata")
-	require.True(t, cm.Exists(), "client_metadata 键保留（r3 envelope 形状）")
-	require.Empty(t, cm.Map(), "client_metadata 内容须被清空")
-	require.Regexp(t, `^pcv2-`, gjson.Get(b2, "prompt_cache_key").String())
-	require.NotContains(t, b2, root)
-	require.NotContains(t, b2, "real-install")
+	require.Equal(t, root+":0", h2.Get("x-codex-window-id"))
+	require.Equal(t, "real-install", h2.Get("x-codex-installation-id"))
+	require.Equal(t, root, gjson.Get(h2.Get("x-codex-turn-metadata"), "thread_id").String())
+	require.Equal(t, root, gjson.Get(b2, "client_metadata.session_id").String())
+	require.Equal(t, root, gjson.Get(b2, "client_metadata.thread_id").String())
+	require.Equal(t, "real-install", gjson.Get(b2, "client_metadata.x-codex-installation-id").String())
+	require.Equal(t, root, gjson.Get(b2, "prompt_cache_key").String())
 	require.NotContains(t, b2, p)
 	for name, values := range h2 {
 		for _, v := range values {
-			require.NotContains(t, v, root, "attempt2 头 %s 不得透传真实 thread", name)
-			require.NotContains(t, v, "real-install", "attempt2 头 %s 不得透传真实 installation", name)
 			require.NotContains(t, v, p, "attempt2 头 %s 残留上一账号假名", name)
 		}
 	}

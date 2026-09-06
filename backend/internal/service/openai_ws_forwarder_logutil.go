@@ -42,14 +42,6 @@ func openAIWSHeaderValueForLog(headers http.Header, key string) string {
 	if headers == nil {
 		return "-"
 	}
-	// Codex 标识符头（session/thread/installation/window 等）的值是客户端或
-	// 网关签发的身份原语，进日志前整体脱敏，避免把会话身份写进运维日志。
-	if isCodexOutboundIdentifierKey(key) {
-		if strings.TrimSpace(headers.Get(key)) == "" {
-			return "-"
-		}
-		return "<redacted>"
-	}
 	return truncateOpenAIWSLogValue(headers.Get(key), openAIWSHeaderValueMaxLen)
 }
 
@@ -73,7 +65,10 @@ func resolveOpenAIWSSessionHeaders(c *gin.Context, promptCacheKey string) openAI
 		ConversationSource: "none",
 	}
 	if c != nil && c.Request != nil {
-		if sessionID := strings.TrimSpace(c.Request.Header.Get("session_id")); sessionID != "" {
+		if sessionID := strings.TrimSpace(c.Request.Header.Get("session-id")); sessionID != "" {
+			resolution.SessionID = sessionID
+			resolution.SessionSource = "header_session-id"
+		} else if sessionID := strings.TrimSpace(c.Request.Header.Get("session_id")); sessionID != "" {
 			resolution.SessionID = sessionID
 			resolution.SessionSource = "header_session_id"
 		}
@@ -169,12 +164,15 @@ func openAIWSEventMayContainToolCalls(eventType string) bool {
 }
 
 func openAIWSEventShouldParseUsage(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
-	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "error" || openAIStreamEventTypeIsTerminal(eventType) {
 		return true
-	default:
-		return false
 	}
+	return strings.HasPrefix(eventType, "response.") && !strings.HasSuffix(eventType, ".delta")
+}
+
+func openAIWSMessageShouldParseUsage(eventType string, message []byte) bool {
+	return openAIWSEventShouldParseUsage(eventType) && bytes.Contains(message, []byte(`"usage"`))
 }
 
 func parseOpenAIWSEventEnvelope(message []byte) (eventType string, responseID string, response gjson.Result) {
@@ -201,11 +199,18 @@ func openAIWSMessageLikelyContainsToolCalls(message []byte) bool {
 }
 
 func parseOpenAIWSResponseUsageFromCompletedEvent(message []byte, usage *OpenAIUsage) {
-	if usage == nil || len(message) == 0 {
+	if usage == nil || len(message) == 0 || !bytes.Contains(message, []byte(`"usage"`)) {
 		return
 	}
 	if parsedUsage, ok := extractOpenAIUsageFromJSONBytes(message); ok {
-		*usage = parsedUsage
+		if openAIStreamEventTypeIsTerminal(effectiveOpenAISSEEventType(message, "")) {
+			if !openAIUsageHasTokens(&parsedUsage) && openAIUsageHasTokens(usage) {
+				return
+			}
+			*usage = parsedUsage
+		} else {
+			mergeOpenAIUsageNonZero(usage, parsedUsage)
+		}
 	}
 }
 
@@ -485,8 +490,7 @@ func dropOpenAIWSPayloadKey(payload map[string]any, key string, removed *[]strin
 
 // applyOpenAIWSRetryPayloadStrategy 在 WS 连续失败时仅移除无语义字段，
 // 避免重试成功却改变原始请求语义。
-// 注意：prompt_cache_key 不应在重试中移除；它用于保持本地缓存语义，
-// 不会被转写为 session_id/conversation_id 出站头。
+// 注意：prompt_cache_key 不应在重试中移除；它常用于会话稳定标识（session_id 兜底）。
 func applyOpenAIWSRetryPayloadStrategy(payload map[string]any, attempt int) (strategy string, removedKeys []string) {
 	if len(payload) == 0 {
 		return "empty", nil

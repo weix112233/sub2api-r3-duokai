@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,10 @@ func (r openAIAccountPoolFallbackGroupRepo) GetByIDLite(_ context.Context, id in
 		return nil, r.err
 	}
 	return r.groups[id], nil
+}
+
+func (r openAIAccountPoolFallbackGroupRepo) GetByID(ctx context.Context, id int64) (*Group, error) {
+	return r.GetByIDLite(ctx, id)
 }
 
 type openAIAccountPoolFallbackAccountRepo struct {
@@ -53,7 +58,30 @@ func (r openAIAccountPoolFallbackAccountRepo) ListSchedulableByGroupIDAndPlatfor
 	accounts := r.accountsByGroup[groupID]
 	result := make([]Account, 0, len(accounts))
 	for _, account := range accounts {
-		if account.Platform == platform {
+		if account.Platform == platform && account.IsSchedulable() {
+			result = append(result, account)
+		}
+	}
+	return result, nil
+}
+
+func (r openAIAccountPoolFallbackAccountRepo) ListModelAvailabilityCandidates(
+	_ context.Context,
+	groupID *int64,
+	platforms []string,
+	_ bool,
+) ([]Account, error) {
+	if groupID == nil {
+		return nil, nil
+	}
+	allowedPlatforms := make(map[string]struct{}, len(platforms))
+	for _, platform := range platforms {
+		allowedPlatforms[platform] = struct{}{}
+	}
+	accounts := r.accountsByGroup[*groupID]
+	result := make([]Account, 0, len(accounts))
+	for _, account := range accounts {
+		if _, allowed := allowedPlatforms[account.Platform]; allowed {
 			result = append(result, account)
 		}
 	}
@@ -141,6 +169,53 @@ func TestOpenAIAccountPoolFallbackTraversesK12TeamPlus(t *testing.T) {
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
 	require.Equal(t, int64(9001), selection.Account.ID)
+}
+
+func TestOpenAIAccountPoolFallbackRestartsHopBudgetAfterTransientWait(t *testing.T) {
+	const groupCount = 16
+	groups := make(map[int64]*Group, groupCount)
+	for index := 0; index < groupCount; index++ {
+		groupID := int64(1000 + index)
+		group := &Group{
+			ID:       groupID,
+			Name:     "pool",
+			Platform: PlatformOpenAI,
+			Status:   StatusActive,
+		}
+		if index+1 < groupCount {
+			group.FallbackGroupID = ptrInt64(groupID + 1)
+		}
+		groups[groupID] = group
+	}
+
+	lastGroupID := int64(1000 + groupCount - 1)
+	account := openAIAccountPoolTestAccount(9016, lastGroupID)
+	resetAt := time.Now().Add(40 * time.Millisecond)
+	account.RateLimitResetAt = &resetAt
+	svc := newOpenAIAccountPoolFallbackService(
+		groups,
+		map[int64][]Account{lastGroupID: {account}},
+		nil,
+	)
+
+	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+		context.Background(),
+		ptrInt64(1000),
+		"",
+		"",
+		"gpt-5.6-sol",
+		nil,
+		OpenAIUpstreamTransportAny,
+		OpenAIEndpointCapabilityChatCompletions,
+		false,
+		false,
+		true,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, account.ID, selection.Account.ID)
 }
 
 func TestOpenAIAccountPoolFallbackDoesNotHideRepositoryErrors(t *testing.T) {

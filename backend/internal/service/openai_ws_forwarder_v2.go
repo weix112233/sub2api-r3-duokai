@@ -22,6 +22,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	c *gin.Context,
 	account *Account,
 	reqBody map[string]any,
+	clientPromptCacheKey string,
 	token string,
 	decision OpenAIWSProtocolDecision,
 	isCodexCLI bool,
@@ -35,9 +36,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 ) (*OpenAIForwardResult, error) {
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
-	}
-	if c != nil && c.Request != nil {
-		s.guardOpenAICodexTurnStateEcho(c, account, c.Request.Header)
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
 
@@ -65,21 +63,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	payload := s.buildOpenAIWSCreatePayload(reqBody, account)
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
-	// 锚点捕获必须在指纹改写之前：machine sink 会把 payload 的 prompt_cache_key
-	// 换成 1:1 假名，会话亲和与「客户端是否显式携带 pck」的判定都要锚定原始值。
-	clientPromptCacheKey := openAIWSPayloadString(payload, "prompt_cache_key")
-	explicitPayloadPromptCacheKey := strings.TrimSpace(clientPromptCacheKey) != ""
-	if clientPromptCacheKey == "" {
-		clientPromptCacheKey = explicitOpenAIRequestSessionID(c, payloadAsJSONBytes(payload))
-	}
-	if c != nil && c.Request != nil {
-		c.Request = c.Request.WithContext(
-			withOpenAIWSPromptCacheKeyPresence(c.Request.Context(), explicitPayloadPromptCacheKey),
-		)
-		c.Request = c.Request.WithContext(
-			withOpenAIWSClientPromptCacheKey(c.Request.Context(), clientPromptCacheKey),
-		)
-	}
 	// 指纹收敛：turn 头提前读取（与 body sink 同点执行，确保 machine 改写
 	// client_metadata（含内嵌 turn metadata）发生在 previous_response_id 读取、
 	// 日志、序列化之前）；WS 链路的 body sink 必须幂等（Forward + ws_forwarder_v2
@@ -94,7 +77,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	applyStagedCodexFingerprintClientMetadata(c, account, payload)
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
-	promptCacheKey := clientPromptCacheKey
+	promptCacheKey := strings.TrimSpace(clientPromptCacheKey)
+	if promptCacheKey == "" {
+		// Fingerprint convergence may inject a default key when the client did
+		// not send one; retain that fallback without replacing an explicit raw key.
+		promptCacheKey = openAIWSPayloadString(payload, "prompt_cache_key")
+	}
 	_, hasTools := payload["tools"]
 	debugEnabled := isOpenAIWSModeDebugEnabled()
 	payloadBytes := -1
@@ -108,30 +96,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	streamValue := "-"
 	if raw, ok := payload["stream"]; ok {
 		streamValue = normalizeOpenAIWSLogValue(strings.TrimSpace(fmt.Sprintf("%v", raw)))
-	}
-	stagedIDs := stagedCodexFingerprintIDsForAccount(c, account)
-	machineStaged := stagedIDs != nil && stagedIDs.mode == codexFingerprintMachine
-	sanitizeCodexOutboundMapValueWithFingerprint(payload, true, true, stagedIDs)
-	if account.Platform == PlatformOpenAI && !isOpenAIResponsesCompactPath(c) {
-		if machineStaged {
-			// machine 的 body sink 已把 prompt_cache_key 做成 1:1 假名（网关产物，
-			// 上面的 sanitizer 已保留）；pcv2 网关键改写会破坏「同一会话同一假名」，
-			// 跳过改写，出站值即 payload 当前值。
-			promptCacheKey = strings.TrimSpace(openAIWSPayloadString(payload, "prompt_cache_key"))
-			setOpenAIOutboundPromptCacheKey(c, promptCacheKey)
-		} else {
-			fallbackKey := deriveOpenAIOutboundPromptCacheKeyFallback(clientPromptCacheKey, mappedModel)
-			derivedKey, rewriteErr := rewriteOpenAIOutboundPromptCacheKeyMapWithFallback(
-				payload,
-				mappedModel,
-				fallbackKey,
-			)
-			if rewriteErr != nil {
-				return nil, wrapOpenAIWSFallback("rewrite_prompt_cache_key", rewriteErr)
-			}
-			promptCacheKey = derivedKey
-			setOpenAIOutboundPromptCacheKey(c, promptCacheKey)
-		}
 	}
 	payloadEventType := openAIWSPayloadString(payload, "type")
 	if payloadEventType == "" {
@@ -165,7 +129,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		attachOpenAILegacySessionHashToGin(c, legacySessionHash)
 	}
 	if turnState == "" && stateStore != nil && sessionHash != "" {
-		if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, account.ID, sessionHash); ok {
+		if savedTurnState, ok := stateStore.GetSessionTurnState(groupID, sessionHash); ok {
 			turnState = savedTurnState
 		}
 	}
@@ -285,7 +249,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		)
 		var dialErr *openAIWSDialError
 		if errors.As(err, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusTooManyRequests {
-			s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
+			s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()), mappedModel)
 		}
 		return nil, wrapOpenAIWSFallback(classifyOpenAIWSAcquireError(err), err)
 	}
@@ -351,7 +315,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	)
 	if handshakeTurnState != "" {
 		if stateStore != nil && sessionHash != "" {
-			stateStore.BindSessionTurnState(groupID, account.ID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())
+			stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())
 		}
 		if c != nil {
 			c.Header(http.CanonicalHeaderKey(openAIWSTurnStateHeader), handshakeTurnState)
@@ -618,8 +582,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 					message = corrected
 				}
 			}
+			message = restoreCodexToolNamesFromContext(c, message)
 		}
-		if openAIWSEventShouldParseUsage(eventType) {
+		if openAIWSMessageShouldParseUsage(eventType, message) {
 			parseOpenAIWSResponseUsageFromCompletedEvent(message, usage)
 		}
 		imageCounter.AddSSEData(message)
@@ -640,7 +605,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		if eventType == "error" {
 			s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
-			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
+			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw, mappedModel)
 			errMsg := strings.TrimSpace(errMsgRaw)
 			if errMsg == "" {
 				errMsg = "Upstream websocket error"
@@ -737,6 +702,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 
 		if isTerminalEvent {
+			if !clientDisconnected {
+				markOpenAIWSClientVisibleFailure(c, eventType, message)
+			}
 			upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
 			// A terminal event must be the final JSON document in its WS message.
 			// Ignore any tail for the completed client turn, but never reuse the
@@ -815,10 +783,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		UpstreamModel:                 mappedModel,
 		UpstreamResponseModel:         responseModelObserver.Model(),
 		UpstreamResponseModelConflict: responseModelObserver.Conflict(),
+		UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
 		ImageCount:                    imageCounter.Count(),
 		ImageOutputSizes:              imageCounter.Sizes(),
-		ServiceTier:                   extractOpenAIServiceTier(reqBody),
+		ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTier(reqBody)),
 		ReasoningEffort:               extractOpenAIReasoningEffort(reqBody, mappedModel, originalModel),
+		RequestedReasoningEffort:      CanonicalRequestedReasoningEffortFromReqBody(reqBody, originalModel, mappedModel),
 		Stream:                        reqStream,
 		OpenAIWSMode:                  true,
 		UpstreamTerminalEvent:         upstreamTerminalEvent,
