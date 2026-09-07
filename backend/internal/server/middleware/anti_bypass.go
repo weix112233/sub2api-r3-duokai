@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,7 +22,9 @@ import (
 
 const (
 	antiBypassDecisionContextKey = "anti_bypass_decision"
-	antiBypassDefaultBodyLimit   = 2 << 20
+	antiBypassDefaultBodyLimit   = 256 << 20
+	antiBypassDefaultFrameLimit  = 64 << 20
+	antiBypassDefaultTextLimit   = 32 << 20
 )
 
 // AntiBypassMiddleware is deliberately separate from billing enforcement. It
@@ -38,6 +41,12 @@ func NewAntiBypassMiddleware(
 	cfg *config.Config,
 ) AntiBypassMiddleware {
 	switchCache := &antiBypassSwitchCache{settings: settings}
+	bodyLimit, frameLimit := antiBypassBodyLimits(cfg)
+	textLimit := antiBypassDefaultTextLimit
+	if cfg != nil && cfg.Gateway.TextMaxBodySize > 0 {
+		textLimit = int(cfg.Gateway.TextMaxBodySize)
+	}
+	textLimit = min(textLimit, bodyLimit)
 	return AntiBypassMiddleware(func(c *gin.Context) {
 		if c == nil {
 			return
@@ -52,6 +61,25 @@ func NewAntiBypassMiddleware(
 			AbortWithError(c, http.StatusServiceUnavailable, "ANTI_BYPASS_UNAVAILABLE", "Gateway security policy is temporarily unavailable")
 			return
 		}
+		var frameSession *antiBypassFrameSession
+		if isResponsesWebSocketRequest(c.Request) {
+			requestCtx, cancel := context.WithCancel(c.Request.Context())
+			var userID, apiKeyID int64
+			if key, ok := GetAPIKeyFromContext(c); ok && key != nil && key.User != nil {
+				userID, apiKeyID = key.User.ID, key.ID
+			}
+			frameSession = &antiBypassFrameSession{
+				guard: guard, config: antibypass.DefaultConfig(), cancel: cancel,
+				requestContext: requestCtx, leases: make(map[int]*antiBypassFrameLease),
+				request: antibypass.Request{
+					UserID: userID, APIKeyID: apiKeyID,
+					ClientIP: ip.GetTrustedClientIP(c), ClientFingerprint: antibypass.FingerprintFromHeaders(c.Request.Header),
+					Method: http.MethodPost, Path: c.Request.URL.Path,
+				},
+			}
+			defer frameSession.Close()
+			c.Request = c.Request.WithContext(antibypass.WithFrameTurnFinisher(requestCtx, frameSession.Finish))
+		}
 		// Install even when disabled so a long-lived WS connection observes
 		// subsequent switch changes. No request body or credential is captured.
 		frameCtx := antibypass.WithFrameInspector(c.Request.Context(), func(ctx context.Context, payload []byte) (antibypass.Detection, error) {
@@ -60,15 +88,21 @@ func NewAntiBypassMiddleware(
 				return antibypass.Detection{Reason: antibypass.ReasonStorageUnavailable}, settingErr
 			}
 			if !enabled {
+				if frameSession != nil {
+					return frameSession.Inspect(ctx, payload, false)
+				}
 				return antibypass.Detection{}, nil
 			}
 			if guard == nil {
 				return antibypass.Detection{Reason: antibypass.ReasonStorageUnavailable}, errors.New("anti-bypass guard missing")
 			}
-			if len(payload) > antiBypassDefaultBodyLimit {
+			if len(payload) > frameLimit {
 				return antibypass.Detection{Reason: antibypass.ReasonBodyTooLarge}, nil
 			}
-			_, detection := antibypass.DetectJailbreak(payload, antiBypassDefaultBodyLimit)
+			_, detection := antibypass.DetectJailbreakWithLimits(payload, frameLimit, min(textLimit, frameLimit))
+			if detection.Reason == "" && frameSession != nil {
+				return frameSession.Inspect(ctx, payload, true)
+			}
 			return detection, nil
 		})
 		c.Request = c.Request.WithContext(frameCtx)
@@ -114,11 +148,16 @@ func NewAntiBypassMiddleware(
 			AbortWithError(c, http.StatusBadRequest, "ANTI_BYPASS_HEADER_CONFLICT", "Ambiguous or duplicate API credential headers")
 			return
 		}
+		if frameSession != nil {
+			// Inference leases and RPM belong to response.create, not an idle socket.
+			c.Next()
+			return
+		}
 
 		var body []byte
 		if isInspectableBody(c.Request) || isPromptBearingGatewayRequest(c.Request) {
 			var bodyErr error
-			body, bodyErr = readBodyForInspection(c.Request, antiBypassDefaultBodyLimit)
+			body, bodyErr = readBodyForInspection(c.Request, bodyLimit)
 			if bodyErr != nil {
 				decision := antibypass.Decision{Reason: antibypass.ReasonBodyTooLarge}
 				recordAntiBypassEvent(c, decision)
@@ -127,12 +166,16 @@ func NewAntiBypassMiddleware(
 			}
 		}
 		if isPromptBearingGatewayRequest(c.Request) {
-			if blocked, detection := antibypass.DetectJailbreak(body, antiBypassDefaultBodyLimit); blocked {
+			if blocked, detection := antibypass.DetectJailbreakWithLimits(body, bodyLimit, textLimit); blocked {
 				blockedDecision := antibypass.Decision{
 					Reason:  detection.Reason,
 					Current: int64(detection.SignalCount),
 				}
 				recordAntiBypassEvent(c, blockedDecision)
+				if detection.Reason == antibypass.ReasonPromptInspectionLimit {
+					AbortWithError(c, http.StatusRequestEntityTooLarge, "ANTI_BYPASS_INSPECTION_LIMIT", "Request exceeds the prompt inspection budget or supported nesting depth")
+					return
+				}
 				AbortWithError(c, http.StatusForbidden, "ANTI_BYPASS_PROMPT_BLOCKED", "Request blocked by gateway prompt security policy")
 				return
 			}
@@ -203,6 +246,28 @@ func antiBypassReleaseContext(parent context.Context) (context.Context, context.
 	return context.WithTimeout(context.WithoutCancel(parent), time.Second)
 }
 
+func antiBypassBodyLimits(cfg *config.Config) (int, int) {
+	body, frame := int64(antiBypassDefaultBodyLimit), int64(antiBypassDefaultFrameLimit)
+	if cfg != nil {
+		if cfg.Gateway.MaxBodySize > 0 {
+			body = cfg.Gateway.MaxBodySize
+		}
+		if cfg.Server.MaxRequestBodySize > 0 && cfg.Server.MaxRequestBodySize < body {
+			body = cfg.Server.MaxRequestBodySize
+		}
+		if cfg.Gateway.OpenAIWS.ClientReadLimitBytes > 0 {
+			frame = cfg.Gateway.OpenAIWS.ClientReadLimitBytes
+		}
+	}
+	return int(body), int(min(body, frame))
+}
+
+func isResponsesWebSocketRequest(request *http.Request) bool {
+	return request != nil && request.URL != nil && request.Method == http.MethodGet &&
+		strings.EqualFold(strings.TrimSpace(request.Header.Get("Upgrade")), "websocket") &&
+		strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/responses")
+}
+
 type antiBypassSwitchCache struct {
 	settings AntiBypassSettings
 	mu       sync.Mutex
@@ -237,7 +302,7 @@ func isProtectedGatewayRequest(request *http.Request) bool {
 	case request.Method == http.MethodGet && path == "/v1/realtime":
 		return true
 	case request.Method == http.MethodGet:
-		return false
+		return isResponsesWebSocketRequest(request)
 	default:
 		return true
 	}
@@ -247,9 +312,15 @@ func isInspectableBody(request *http.Request) bool {
 	if request == nil {
 		return false
 	}
-	contentType := strings.ToLower(strings.TrimSpace(request.Header.Get("Content-Type")))
-	return contentType == "" ||
-		strings.HasPrefix(contentType, "application/json") ||
+	raw := strings.TrimSpace(request.Header.Get("Content-Type"))
+	contentType, _, err := mime.ParseMediaType(raw)
+	if raw == "" {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return contentType == "application/json" ||
 		strings.HasSuffix(contentType, "+json") ||
 		strings.HasPrefix(contentType, "text/")
 }

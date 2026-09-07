@@ -35,20 +35,21 @@ const (
 type Reason string
 
 const (
-	ReasonNone                 Reason = ""
-	ReasonRPM                  Reason = "rpm_limit"
-	ReasonConcurrency          Reason = "concurrency_limit"
-	ReasonDistinctKeys         Reason = "distinct_api_keys"
-	ReasonDistinctIPs          Reason = "distinct_client_ips"
-	ReasonDistinctFingerprints Reason = "distinct_client_fingerprints"
-	ReasonReplay               Reason = "replay_across_identity"
-	ReasonDuplicateRequest     Reason = "duplicate_request_id"
-	ReasonPromptJailbreak      Reason = "prompt_jailbreak"
-	ReasonPromptEncodingLimit  Reason = "prompt_encoding_limit"
-	ReasonHeaderConflict       Reason = "credential_header_conflict"
-	ReasonBodyTooLarge         Reason = "body_inspection_limit"
-	ReasonStorageUnavailable   Reason = "storage_unavailable"
-	ReasonInvalidSubject       Reason = "invalid_subject"
+	ReasonNone                  Reason = ""
+	ReasonRPM                   Reason = "rpm_limit"
+	ReasonConcurrency           Reason = "concurrency_limit"
+	ReasonDistinctKeys          Reason = "distinct_api_keys"
+	ReasonDistinctIPs           Reason = "distinct_client_ips"
+	ReasonDistinctFingerprints  Reason = "distinct_client_fingerprints"
+	ReasonReplay                Reason = "replay_across_identity"
+	ReasonDuplicateRequest      Reason = "duplicate_request_id"
+	ReasonPromptJailbreak       Reason = "prompt_jailbreak"
+	ReasonPromptEncodingLimit   Reason = "prompt_encoding_limit"
+	ReasonPromptInspectionLimit Reason = "prompt_inspection_limit"
+	ReasonHeaderConflict        Reason = "credential_header_conflict"
+	ReasonBodyTooLarge          Reason = "body_inspection_limit"
+	ReasonStorageUnavailable    Reason = "storage_unavailable"
+	ReasonInvalidSubject        Reason = "invalid_subject"
 )
 
 // Config contains the safety budgets for the guard. The feature's only
@@ -216,7 +217,8 @@ end
 
 if ARGV[5] ~= "" then
   local previous_identity = redis.call("GET", KEYS[6])
-  if previous_identity and previous_identity ~= ARGV[5] then
+  local previous_key = previous_identity and (string.match(previous_identity, "^(%d+):") or previous_identity)
+  if previous_key and previous_key ~= ARGV[5] then
     return {0, "replay_across_identity", 1, 0, rpm, distinct_keys, distinct_ips, distinct_fingerprints}
   end
 end
@@ -293,7 +295,8 @@ func (g *Guard) Check(ctx context.Context, cfg Config, req Request) (Decision, e
 
 	clientIP := digest(normalize(req.ClientIP))
 	clientFingerprint := digest(normalize(req.ClientFingerprint))
-	identity := fmt.Sprintf("%d:%s:%s", req.APIKeyID, clientIP, clientFingerprint)
+	// Negotiation headers and network changes do not change the authenticated key.
+	identity := strconv.FormatInt(req.APIKeyID, 10)
 	requestHash := requestDigest(req)
 	leaseToken, err := newLeaseToken()
 	if err != nil {
@@ -314,7 +317,7 @@ func (g *Guard) Check(ctx context.Context, cfg Config, req Request) (Decision, e
 		fmt.Sprintf("%s:rpm", userPrefix),
 		fmt.Sprintf("%s:ips", userPrefix),
 		fmt.Sprintf("%s:keys", userPrefix),
-		fmt.Sprintf("%s:fingerprints", userPrefix),
+		fmt.Sprintf("%s:fingerprints:v2", userPrefix),
 		fmt.Sprintf("%s:payload:%s", userPrefix, requestHash),
 		fmt.Sprintf("%s:idempotency:%s", userPrefix, digest(idempotencyKey)),
 		fmt.Sprintf("%s:request:%s", userPrefix, digest(clientRequestID)),
@@ -498,6 +501,9 @@ func retryAfterFor(reason Reason, cfg Config) time.Duration {
 }
 
 func dimensionKey(dimension string, userID int64) string {
+	if dimension == "fingerprints" {
+		dimension = "fingerprints:v2"
+	}
 	return fmt.Sprintf("%s:{user:%d}:%s", keyPrefix, userID, dimension)
 }
 

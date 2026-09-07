@@ -366,7 +366,7 @@ func TestAntiBypassInspectsWebSocketFirstAndFollowupFrames(t *testing.T) {
 	}
 }
 
-func TestAntiBypassIgnoresTrustedInstructionRoles(t *testing.T) {
+func TestAntiBypassInspectsCallerInstructionRoles(t *testing.T) {
 	var called bool
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
@@ -383,8 +383,9 @@ func TestAntiBypassIgnoresTrustedInstructionRoles(t *testing.T) {
 
 	router.ServeHTTP(recorder, request)
 
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.True(t, called)
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+	require.False(t, called)
+	require.Contains(t, recorder.Body.String(), "ANTI_BYPASS_PROMPT_BLOCKED")
 }
 
 func TestAntiBypassKeepsIdempotencyAndClientRequestSemanticsSeparate(t *testing.T) {

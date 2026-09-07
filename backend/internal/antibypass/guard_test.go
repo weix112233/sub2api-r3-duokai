@@ -667,7 +667,7 @@ func TestDetectJailbreakNormalizesSeparatedKeywordObfuscation(t *testing.T) {
 	require.Empty(t, detection.Reason)
 }
 
-func TestDetectJailbreakIgnoresTrustedInstructionRoles(t *testing.T) {
+func TestDetectJailbreakInspectsCallerInstructionRoles(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -693,8 +693,8 @@ func TestDetectJailbreakIgnoresTrustedInstructionRoles(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			blocked, detection := DetectJailbreak([]byte(test.body), DefaultConfig().MaxBodyInspectionBytes)
-			require.False(t, blocked)
-			require.Empty(t, detection.Reason)
+			require.True(t, blocked)
+			require.Equal(t, ReasonPromptJailbreak, detection.Reason)
 		})
 	}
 }

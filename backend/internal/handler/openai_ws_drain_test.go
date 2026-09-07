@@ -14,17 +14,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/antibypass"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/alicebob/miniredis/v2"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
 type drainHTTPUpstream struct{ service.HTTPUpstream }
+type drainAntiBypassSettings struct{}
+
+func (drainAntiBypassSettings) IsAntiBypassEnabled(context.Context) (bool, error) {
+	return true, nil
+}
 
 func (u *drainHTTPUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
@@ -157,6 +165,12 @@ func TestRealResponsesWSDrainKeepsFirstTurnAndTerminalWrite(t *testing.T) {
 				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 84, Concurrency: 1})
 				c.Next()
 			})
+			guardStore := miniredis.RunT(t)
+			guardRedis := redis.NewClient(&redis.Options{Addr: guardStore.Addr()})
+			defer guardRedis.Close()
+			router.Use(gin.HandlerFunc(middleware.NewAntiBypassMiddleware(
+				antibypass.NewGuard(guardRedis), drainAntiBypassSettings{}, cfg,
+			)))
 			router.GET("/v1/responses", h.ResponsesWebSocket)
 			registry := wsdrain.New()
 			server := httptest.NewUnstartedServer(registry.Handler(router))
@@ -177,6 +191,12 @@ func TestRealResponsesWSDrainKeepsFirstTurnAndTerminalWrite(t *testing.T) {
 				t.Fatal("actual upstream not reached")
 			}
 			require.Equal(t, 1, registry.Snapshot().Active, "first turn must be registered before either transport starts")
+			inflight, err := guardRedis.ZCard(ctx, "sub2api:anti-bypass:v3:{user:84}:inflight").Result()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, inflight, "the actual first inference must hold exactly one anti-bypass lease")
+			rpm, err := guardRedis.ZCard(ctx, "sub2api:anti-bypass:v3:{user:84}:rpm").Result()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, rpm, "handshake and inference must not double-count")
 			releaseUpstream()
 			select {
 			case <-gate.atWrite:
@@ -198,6 +218,10 @@ func TestRealResponsesWSDrainKeepsFirstTurnAndTerminalWrite(t *testing.T) {
 			require.Equal(t, coderws.StatusServiceRestart, coderws.CloseStatus(err))
 			require.NoError(t, registry.Wait(ctx))
 			require.Zero(t, registry.Count())
+			require.Eventually(t, func() bool {
+				count, readErr := guardRedis.ZCard(context.Background(), "sub2api:anti-bypass:v3:{user:84}:inflight").Result()
+				return readErr == nil && count == 0
+			}, time.Second, time.Millisecond, "actual handler must release the anti-bypass turn")
 		})
 	}
 }

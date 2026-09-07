@@ -1,6 +1,8 @@
 {
   "schema": "sub2api-r10-portable-validation.v1",
   "artifactKind": "source_delivery",
+  "historicalValidationForOriginalR10SourceDelivery": true,
+  "subsequentAntibypassRepairValidation": "delivery/antibypass-repair-validation.json",
   "baseCommit": "d9e796f",
   "candidateBinaryBuilt": false,
   "candidateDeployed": false,

@@ -48,24 +48,40 @@ var (
 		`\b(do not|don't|never|must not)\b.{0,40}\b(execute|follow|obey|comply|perform|act on)\b|` +
 			`不要.{0,20}(执行|遵循|服从|照做)|不得.{0,20}(执行|遵循|服从|照做)|仅分析不执行`,
 	)
-	quotedSamplePattern          = regexp.MustCompile(`\b(quoted|quote|sample|example|payload|attack string|jailbreak prompt)\b|引用|样本|示例|攻击文本|越狱提示词`)
-	explicitQuotePattern         = regexp.MustCompile("(?s)\"[^\"\\n]+\"|“[^”\\n]+”|```.+?```")
-	analysisLabelPattern         = regexp.MustCompile(`\b(quoted\s+)?jailbreak\s+(sample|prompt)\b|越狱提示词(样本)?`)
-	compactNegationPrefixPattern = regexp.MustCompile(`(?:donot|dont|never|mustnot|shouldnot|shouldnt|without|不要|不得|切勿|不能|不应|禁止|不可)$`)
+	quotedSamplePattern           = regexp.MustCompile(`\b(quoted|quote|sample|example|payload|attack string|jailbreak prompt)\b|引用|样本|示例|攻击文本|越狱提示词`)
+	explicitQuotePattern          = regexp.MustCompile("(?s)\"[^\"\\n]+\"|“[^”\\n]+”|```.+?```")
+	analysisLabelPattern          = regexp.MustCompile(`\b(quoted\s+)?jailbreak\s+(sample|prompt)\b|越狱提示词(样本)?`)
+	compactNegationPrefixPattern  = regexp.MustCompile(`(?:donot|dont|never|mustnot|shouldnot|shouldnt|without|不要|不得|切勿|不能|不应|禁止|不可)(?:ever|again|underanycircumstances|再|再次|擅自|绝对){0,2}$`)
+	quotedDataTaskPattern         = regexp.MustCompile(`\btranslate\b|翻译|\b(?:add|write|create)\b[^\n.!?;]{0,160}\b(?:unit test|test case)\b[^\n.!?;]{0,120}\b(?:fixture|string|literal|sample)\b|(?:编写|添加|创建).{0,60}(?:单元测试|测试用例).{0,60}(?:字符串|样本|字面量)`)
+	compactQuotedExecutionPattern = regexp.MustCompile(`(?:follow|obey|execute|apply|perform)(?:all|the|these|those|this|that|quoted|sample|provided|above|below|instructions|it)|(?:执行|遵循|照做)(?:引用|引文|样本|上述|其中|它)`)
 )
 
 // DetectJailbreak scans only bounded request bytes and never returns the
 // original text. It intentionally blocks high-confidence combinations rather
 // than treating every mention of "prompt" as malicious.
 func DetectJailbreak(body []byte, maxBytes int) (bool, Detection) {
-	if maxBytes <= 0 || len(body) == 0 || len(body) > maxBytes {
-		return false, Detection{}
-	}
-	if !rawBodyMayContainJailbreak(body) {
-		return false, Detection{}
-	}
+	return DetectJailbreakWithLimits(body, maxBytes, maxBytes)
+}
 
-	for _, message := range extractPromptTexts(body) {
+// Media may occupy the wire budget without consuming the text inspection budget.
+func DetectJailbreakWithLimits(body []byte, maxBytes, maxTextBytes int) (bool, Detection) {
+	if maxBytes <= 0 || len(body) == 0 {
+		return false, Detection{}
+	}
+	if len(body) > maxBytes {
+		return true, Detection{Reason: ReasonBodyTooLarge}
+	}
+	if maxTextBytes <= 0 {
+		return true, Detection{Reason: ReasonPromptInspectionLimit}
+	}
+	messages, complete := extractPromptTexts(body, maxTextBytes)
+	if !complete {
+		return true, Detection{Reason: ReasonPromptInspectionLimit}
+	}
+	for _, message := range messages {
+		if !rawBodyMayContainJailbreak([]byte(message)) {
+			continue
+		}
 		text, encodingLimit := decodePromptUnicodeEscapes(norm.NFKC.String(message))
 		if encodingLimit {
 			return true, Detection{Reason: ReasonPromptEncodingLimit, SignalCount: 1}
@@ -106,65 +122,101 @@ func rawBodyMayContainJailbreak(body []byte) bool {
 	return hasUnicodeEscape || rawCompactMayContainJailbreak(builder.String())
 }
 
-func extractPromptTexts(body []byte) []string {
+type promptTexts struct {
+	messages []string
+	bytes    int
+	limit    int
+}
+
+func extractPromptTexts(body []byte, maxTextBytes int) ([]string, bool) {
 	var root map[string]any
 	if json.Unmarshal(body, &root) != nil {
-		return []string{string(body)}
+		if len(body) > maxTextBytes {
+			return nil, false
+		}
+		return []string{string(body)}, true
 	}
+	return extractPromptFields(root, maxTextBytes)
+}
 
-	var texts []string
+func extractPromptFields(root map[string]any, maxTextBytes int) ([]string, bool) {
+	texts := promptTexts{limit: maxTextBytes}
 	if messages, ok := root["messages"]; ok {
-		appendRoleMessages(&texts, messages, false)
+		if !appendRoleMessages(&texts, messages, false) {
+			return nil, false
+		}
 	}
 	if input, ok := root["input"]; ok {
-		appendResponsesInput(&texts, input)
+		if !appendResponsesInput(&texts, input) {
+			return nil, false
+		}
 	}
 	if contents, ok := root["contents"]; ok {
-		appendRoleMessages(&texts, contents, true)
+		if !appendRoleMessages(&texts, contents, true) {
+			return nil, false
+		}
 	}
-	if prompt, ok := root["prompt"]; ok {
-		appendPromptText(&texts, prompt)
+	for _, key := range []string{"prompt", "query", "instructions", "system", "system_instruction", "systemInstruction"} {
+		if value, ok := root[key]; ok && !appendPromptText(&texts, value) {
+			return nil, false
+		}
 	}
-	if query, ok := root["query"]; ok {
-		appendPromptText(&texts, query)
+	for _, envelope := range []string{"response", "session"} {
+		if content, ok := root[envelope].(map[string]any); ok {
+			// Realtime control frames have explicit envelopes; never recurse arbitrary data.
+			for _, key := range []string{"instructions", "input"} {
+				if value, ok := content[key]; ok && !appendPromptText(&texts, value) {
+					return nil, false
+				}
+			}
+		}
 	}
-	return texts
+	return texts.messages, true
 }
 
-func appendPromptText(texts *[]string, content any) {
+func appendPromptText(texts *promptTexts, content any) bool {
 	var builder strings.Builder
-	appendPromptValue(&builder, content, 0)
-	if builder.Len() > 0 {
-		*texts = append(*texts, builder.String())
+	if !appendPromptValue(&builder, content, 0, texts.limit-texts.bytes) {
+		return false
 	}
+	if builder.Len() > 0 {
+		texts.messages = append(texts.messages, builder.String())
+		texts.bytes += builder.Len()
+	}
+	return true
 }
 
-func appendResponsesInput(texts *[]string, input any) {
+func appendResponsesInput(texts *promptTexts, input any) bool {
 	switch input := input.(type) {
 	case string:
-		appendPromptText(texts, input)
+		return appendPromptText(texts, input)
 	case []any:
 		for _, item := range input {
 			switch item := item.(type) {
 			case string:
-				appendPromptText(texts, item)
+				if !appendPromptText(texts, item) {
+					return false
+				}
 			case map[string]any:
-				if isUserRole(stringValue(item["role"]), false) {
-					appendPromptText(texts, item["content"])
+				if isInstructionRole(stringValue(item["role"]), false) {
+					if !appendPromptText(texts, item["content"]) {
+						return false
+					}
 				}
 			}
 		}
 	case map[string]any:
-		if isUserRole(stringValue(input["role"]), false) {
-			appendPromptText(texts, input["content"])
+		if isInstructionRole(stringValue(input["role"]), false) {
+			return appendPromptText(texts, input["content"])
 		}
 	}
+	return true
 }
 
-func appendRoleMessages(texts *[]string, messages any, allowMissingUserRole bool) {
+func appendRoleMessages(texts *promptTexts, messages any, allowMissingUserRole bool) bool {
 	items, ok := messages.([]any)
 	if !ok {
-		return
+		return true
 	}
 	for _, item := range items {
 		message, ok := item.(map[string]any)
@@ -172,55 +224,62 @@ func appendRoleMessages(texts *[]string, messages any, allowMissingUserRole bool
 			continue
 		}
 		role := strings.ToLower(strings.TrimSpace(stringValue(message["role"])))
-		if !isUserRole(role, allowMissingUserRole) {
+		if !isInstructionRole(role, allowMissingUserRole) {
 			continue
 		}
 		// Content blocks of one message stay together; different messages cannot
 		// grant each other an analysis exception or fabricate combined signals.
-		appendPromptText(texts, []any{message["content"], message["parts"]})
+		if !appendPromptText(texts, []any{message["content"], message["parts"]}) {
+			return false
+		}
 	}
+	return true
 }
 
-func isUserRole(role string, allowMissing bool) bool {
+func isInstructionRole(role string, allowMissing bool) bool {
 	role = strings.ToLower(strings.TrimSpace(role))
-	return role == "user" || role == "human" || (allowMissing && role == "")
+	return role == "user" || role == "human" || role == "system" || role == "developer" || (allowMissing && role == "")
 }
 
-func appendPromptValue(builder *strings.Builder, value any, depth int) {
-	if builder.Len() >= 2<<20 || depth > 16 {
-		return
+func appendPromptValue(builder *strings.Builder, value any, depth, maxBytes int) bool {
+	if depth > 16 {
+		return false
 	}
 	switch value := value.(type) {
 	case string:
-		remaining := (2 << 20) - builder.Len()
-		if len(value) > remaining {
-			value = value[:remaining]
+		if len(value)+1 > maxBytes-builder.Len() {
+			return false
 		}
 		builder.WriteString(value)
 		builder.WriteByte('\n')
 	case []any:
 		for _, item := range value {
-			appendPromptValue(builder, item, depth+1)
+			if !appendPromptValue(builder, item, depth+1, maxBytes) {
+				return false
+			}
 		}
 	case map[string]any:
 		contentType := strings.ToLower(strings.TrimSpace(stringValue(value["type"])))
 		if contentType != "" {
 			switch contentType {
 			case "text", "input_text":
-				appendPromptValue(builder, value["text"], depth+1)
+				return appendPromptValue(builder, value["text"], depth+1, maxBytes)
 			case "message":
-				if isUserRole(stringValue(value["role"]), false) {
-					appendPromptValue(builder, value["content"], depth+1)
+				if isInstructionRole(stringValue(value["role"]), false) {
+					return appendPromptValue(builder, value["content"], depth+1, maxBytes)
 				}
 			}
-			return
+			return true
 		}
 		for _, key := range []string{"text", "content", "parts"} {
 			if item, ok := value[key]; ok {
-				appendPromptValue(builder, item, depth+1)
+				if !appendPromptValue(builder, item, depth+1, maxBytes) {
+					return false
+				}
 			}
 		}
 	}
+	return true
 }
 
 func stringValue(value any) string {
@@ -252,10 +311,12 @@ func isExplicitSecurityAnalysis(text string) bool {
 	outside.WriteString(text[last:])
 	outsideText := outside.String()
 
-	if !quotedAttack ||
-		!analysisPattern.MatchString(outsideText) ||
-		!noExecutePattern.MatchString(outsideText) ||
-		!quotedSamplePattern.MatchString(outsideText) {
+	analysisTask := analysisPattern.MatchString(outsideText) &&
+		noExecutePattern.MatchString(outsideText) && quotedSamplePattern.MatchString(outsideText)
+	compactOutside, boundaries := compactPromptSignals(outsideText)
+	dataTask := quotedDataTaskPattern.MatchString(outsideText) &&
+		!hasActivePromptMatch(compactOutside, boundaries, compactQuotedExecutionPattern, false)
+	if !quotedAttack || (!analysisTask && !dataTask) {
 		return false
 	}
 	outsideSignals := analysisLabelPattern.ReplaceAllString(outsideText, " ")
@@ -441,9 +502,6 @@ func FingerprintFromHeaders(requestHeaders http.Header) string {
 	var builder bytes.Buffer
 	for _, header := range []string{
 		"user-agent",
-		"accept",
-		"accept-language",
-		"content-type",
 		"sec-ch-ua",
 		"sec-ch-ua-platform",
 		"x-tls-fingerprint",

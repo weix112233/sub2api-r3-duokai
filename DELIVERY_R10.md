@@ -1,5 +1,12 @@
 # Sub2API R10 Source Delivery
 
+## 后续防破限源码修复
+
+本分支后续增加了防破限业务边界修复，详见 `delivery/ANTIBYPASS_REPAIR.md`。
+下面的 R10 归属修复验证数据保留为历史记录，不能代替后续防破限验证；
+新的验证结果记录在 `delivery/antibypass-repair-validation.json`。
+原 `ace20e9` 下载包仍是原提交快照，不包含后续修复，不应与当前分支混用。
+
 ## 交付状态
 
 这是源码交付版本，不是已经构建或已经部署的 R10 二进制发布。

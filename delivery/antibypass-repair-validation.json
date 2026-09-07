@@ -1,0 +1,64 @@
+{
+  "schema": "sub2api-antibypass-business-repair-validation.v1",
+  "deliveryTier": "validated_candidate",
+  "scope": "application anti-bypass findings F1-F6 and Git source delivery",
+  "baseCommit": "ace20e9a49fc30be75da19a7389f46b7a85bc5b1",
+  "applicationBinaryBuilt": false,
+  "productionDeployed": false,
+  "productionSettingsChanged": false,
+  "executionGuardsChanged": false,
+  "sourceRegressionBeforeRepair": {
+    "command": "go test -p 2 ./internal/antibypass -run '^TestBusinessBoundary' -count=1 -timeout=90s",
+    "exitCode": 1,
+    "failingTestMethodsObserved": 6,
+    "observations": [
+      "ninth multipart upload rejected as a distinct client",
+      "negotiated headers changed fingerprint",
+      "same-key network change rejected as replay",
+      "quoted translation rejected as jailbreak",
+      "client instructions were not inspected",
+      "text beyond 2 MiB was not inspected"
+    ]
+  },
+  "backendTaggedUnit": {
+    "command": "go test -json -tags unit -p 2 ./... -count=1 -timeout=300s",
+    "startedAt": "2026-09-07T20:12:59.168+08:00",
+    "completedAt": "2026-09-07T20:17:59.640+08:00",
+    "passedTestEvents": 18415,
+    "failedTestEvents": 0,
+    "exitCode": 0,
+    "reportSha256": "8eb0aa3f0f8d7b84e723da431a5d31dd0df291506a51776de4e7f4a26eae1f39"
+  },
+  "selectedRace": {
+    "startedAt": "2026-09-07T20:12:59.223+08:00",
+    "completedAt": "2026-09-07T20:14:36.444+08:00",
+    "passedTestEvents": 43,
+    "failedTestEvents": 0,
+    "exitCode": 0,
+    "reportSha256": "07f248d3348726479495964d30cb29e151def30492ec8782352fca18acad6325",
+    "actualHandlerModes": ["ctx_pool", "http_bridge", "passthrough"]
+  },
+  "validationBoundaries": [
+    "local synthetic and real-handler fixture tests, not live-provider inference",
+    "no production load or deployment acceptance claim",
+    "natural-language heuristic is not a complete prompt-injection security boundary",
+    "tool outputs, assistant history and media remain data by explicit policy",
+    "standalone realtime transport retains its existing connection policy",
+    "uniform application generation recommended; mixed old/new policy state differs during bounded TTL windows"
+  ],
+  "sourceSha256": {
+    "backend/internal/antibypass/frame.go": "59e13fa5913670b7113f1ed5f9566d0da253d90eb951255d256940263eb3e6e4",
+    "backend/internal/antibypass/guard.go": "8f478c5490ab47f53749c0d891c5eb87e86a0ab94d4386fb8aab345a164f5d93",
+    "backend/internal/antibypass/prompt.go": "10c7fb36e17141e442dbe87283acc28ce2f40172e0694f62765a55726bc8e3c6",
+    "backend/internal/antibypass/business_boundaries_test.go": "faecda9d0b318f7ae86cc0df3747a1d04d4dbd8a05d43ea82dac4b1a26a259cc",
+    "backend/internal/antibypass/guard_test.go": "8e701d544b772f012bdcdc41323ccc9fb5222737cc822f37a3bb8b6c8c01035c",
+    "backend/internal/antibypass/prompt_unicode_test.go": "3e7f8fc330aee3163d77eb123f0fd4217e1be0b917126683eb07e02c18424eaa",
+    "backend/internal/server/middleware/anti_bypass.go": "8b1ca96deead85e561856c3d0f5c7d3ae3686801f56b3796729484d6d32c9366",
+    "backend/internal/server/middleware/anti_bypass_frames.go": "5d3d1a720d836025c9467bea44c460218c857ae6bed752d2d6756dea97ad280c",
+    "backend/internal/server/middleware/anti_bypass_business_test.go": "d4ea440b395ae56a1e06d2f4b9527e2b71b6fecaa1ae1e54bdf28275b6cf40f4",
+    "backend/internal/server/middleware/anti_bypass_test.go": "88751680a2b4c164f11c43ed5d9e3c5027d66112581d9d145fd204caacddea93",
+    "backend/internal/handler/openai_gateway_handler.go": "a527769d8c538af21c92ac69cf7c6a8ff6704c738117c03a96f73f39265f5f89",
+    "backend/internal/handler/openai_ws_drain_test.go": "1db541b017936fc0f0e0ce8473430d5796c1c9eb1e1cfa37c8a8e9de6f037a18",
+    "backend/internal/service/openai_ws_client_read.go": "0823cdcaea8f0bb64d709efab34318922c477aca636c3b3a8672126c647fdd0e"
+  }
+}

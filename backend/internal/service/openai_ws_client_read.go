@@ -105,17 +105,26 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 				if inspectionErr != nil || detection.Reason != antibypass.ReasonNone {
 					status := coderws.StatusPolicyViolation
 					code := "ANTI_BYPASS_PROMPT_BLOCKED"
+					errorType := "invalid_request_error"
 					if inspectionErr != nil {
 						status = coderws.StatusTryAgainLater
 						code = "ANTI_BYPASS_UNAVAILABLE"
+						errorType = "server_error"
 					} else if detection.Reason == antibypass.ReasonBodyTooLarge {
 						status = coderws.StatusMessageTooBig
 						code = "ANTI_BYPASS_BODY_TOO_LARGE"
+					} else if detection.Reason == antibypass.ReasonPromptInspectionLimit {
+						status = coderws.StatusPolicyViolation
+						code = "ANTI_BYPASS_INSPECTION_LIMIT"
+					} else if antibypass.IsAdmissionLimit(detection.Reason) {
+						status = coderws.StatusTryAgainLater
+						code = "ANTI_BYPASS_BLOCKED"
+						errorType = "rate_limit_error"
 					}
 					slog.Warn("anti_bypass_ws_frame_blocked", "reason", detection.Reason, "code", code)
 					event, _ := json.Marshal(map[string]any{
 						"type": "error",
-						"error": map[string]any{"type": "invalid_request_error", "code": code,
+						"error": map[string]any{"type": errorType, "code": code, "reason": detection.Reason,
 							"message": "WebSocket frame blocked by gateway security policy"},
 					})
 					writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
