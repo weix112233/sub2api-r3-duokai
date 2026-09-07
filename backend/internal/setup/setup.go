@@ -266,10 +266,11 @@ func TestDatabaseConnection(cfg *DatabaseConfig) error {
 // TestRedisConnection tests the Redis connection
 func TestRedisConnection(cfg *RedisConfig) error {
 	opts := &redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Username: cfg.Username,
-		Password: cfg.Password,
-		DB:       cfg.DB,
+		ContextTimeoutEnabled: true,
+		Addr:                  fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Username:              cfg.Username,
+		Password:              cfg.Password,
+		DB:                    cfg.DB,
 	}
 
 	if cfg.EnableTLS {

@@ -376,6 +376,7 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message = credentialFailoverClientResponse(lastErr)
 	} else if lastErr != nil && lastErr.IsOpenAICapacityShed() && strings.TrimSpace(lastErr.ClientMessage) != "" {
+		code = "server_is_overloaded"
 		status = lastErr.ClientStatusCode
 		if status <= 0 {
 			status = http.StatusServiceUnavailable

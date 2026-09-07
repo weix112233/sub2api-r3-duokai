@@ -1329,35 +1329,21 @@ func logOpenAICapacityFailoverSuppressed(
 	logger.FromContext(ctx).Warn("gateway.failover_suppressed_after_semantic_output", fields...)
 }
 
-// openAICapacityShedRetryableClientCode 是把上游容量降载错误转发给客户端时改写
-// 使用的错误码。Codex CLI 按闭集对错误码分类：server_is_overloaded / slow_down
-// 被判为致命错误（客户端提示 "Selected model is at capacity. Please try a
-// different model." 并直接终止会话），而 server_error 等致命集之外的错误码会进入
-// 客户端内置的退避重试。
-const openAICapacityShedRetryableClientCode = "server_error"
-
-// sanitizeOpenAICapacityShedErrorCodeForClient 把即将写给下游客户端的
-// error / response.failed 事件中的容量降载错误码改写为客户端可重试的错误码。
-// 走到转发这一步说明网关侧 failover 已不可用（流中途）或已用尽；保留原始降载码
-// 只会让客户端就地终止会话。错误消息原样保留；监控与账号状态判定都基于改写前
-// 的原始 payload，不受影响。rate_limit 等其他错误码一律不动（客户端依赖
-// rate_limit_exceeded 原码解析重试延时）。
+// Preserve capacity codes so exhausted gateway retries do not start another
+// client retry loop. Only supply a missing code for an explicit capacity message;
+// quota, authorization, and all other existing error codes remain unchanged.
 func sanitizeOpenAICapacityShedErrorCodeForClient(payload []byte) ([]byte, bool) {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) || !isOpenAIUpstreamCapacityShedEvent(payload) {
+	if !gjson.ValidBytes(payload) || !isOpenAIUpstreamCapacityShedEvent(payload) {
 		return payload, false
 	}
 	updated := payload
 	changed := false
-	for _, path := range []string{"response.error.code", "error.code"} {
-		parent := strings.TrimSuffix(path, ".code")
-		if !gjson.GetBytes(updated, parent).Exists() {
+	for _, path := range []string{"response.error", "error"} {
+		errObject := gjson.GetBytes(updated, path)
+		if !errObject.IsObject() || strings.TrimSpace(errObject.Get("code").String()) != "" {
 			continue
 		}
-		code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(updated, path).String()))
-		if code != "" && code != "server_is_overloaded" && code != "slow_down" {
-			continue
-		}
-		next, err := sjson.SetBytes(updated, path, openAICapacityShedRetryableClientCode)
+		next, err := sjson.SetBytes(updated, path+".code", "server_is_overloaded")
 		if err != nil {
 			return payload, false
 		}

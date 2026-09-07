@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
 	"math"
 	"net"
 	"net/http"
@@ -365,8 +366,10 @@ func (h *OpsHandler) QPSWSHandler(c *gin.Context) {
 		return
 	}
 
+	drainSession := wsdrain.TrackGorilla(c.Request.Context(), conn)
 	defer func() {
 		_ = conn.Close()
+		drainSession.Release()
 	}()
 
 	handleQPSWebSocket(c.Request.Context(), conn)

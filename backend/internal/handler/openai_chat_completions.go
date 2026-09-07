@@ -153,6 +153,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 
@@ -332,7 +333,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
-					if !failoverErr.ShouldRetryNextAccount() {
+					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

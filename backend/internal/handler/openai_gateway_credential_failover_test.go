@@ -87,7 +87,7 @@ func TestOpenAIAccessStateCredentialFailureUsesTypedSafeResponse(t *testing.T) {
 	require.NotContains(t, recorder.Body.String(), "must-not-leak")
 }
 
-func TestOpenAICapacityFailoverExhaustionPreservesMessageAsServerError(t *testing.T) {
+func TestOpenAICapacityFailoverExhaustionPreservesProtocolClassification(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	message := "Our servers are currently overloaded. Please try again later."
 	failoverErr := &service.UpstreamFailoverError{
@@ -106,7 +106,7 @@ func TestOpenAICapacityFailoverExhaustionPreservesMessageAsServerError(t *testin
 		require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 		require.Equal(t, "server_error", gjson.Get(recorder.Body.String(), "error.type").String())
 		require.Equal(t, message, gjson.Get(recorder.Body.String(), "error.message").String())
-		require.NotContains(t, recorder.Body.String(), "server_is_overloaded")
+		require.Equal(t, "server_is_overloaded", gjson.Get(recorder.Body.String(), "error.code").String())
 	})
 
 	t.Run("responses_compat", func(t *testing.T) {
@@ -114,7 +114,7 @@ func TestOpenAICapacityFailoverExhaustionPreservesMessageAsServerError(t *testin
 		c, _ := gin.CreateTestContext(recorder)
 		(&GatewayHandler{}).handleResponsesFailoverExhausted(c, failoverErr, false)
 		require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
-		require.Equal(t, "server_error", gjson.Get(recorder.Body.String(), "error.code").String())
+		require.Equal(t, "server_is_overloaded", gjson.Get(recorder.Body.String(), "error.code").String())
 		require.Equal(t, message, gjson.Get(recorder.Body.String(), "error.message").String())
 	})
 

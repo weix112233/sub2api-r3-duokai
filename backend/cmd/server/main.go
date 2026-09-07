@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
+
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -132,6 +134,10 @@ func runSetupServer() {
 }
 
 func runMainServer() {
+	drainTimeout, err := shutdownTimeout(os.Getenv("SERVER_SHUTDOWN_TIMEOUT"))
+	if err != nil {
+		log.Fatalf("Invalid shutdown configuration: %v", err)
+	}
 	cfg, err := config.LoadForBootstrap()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -153,6 +159,8 @@ func runMainServer() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 	defer app.Cleanup()
+	webSockets := wsdrain.New()
+	app.Server.Handler = webSockets.Handler(app.Server.Handler)
 	if app.PluginManager != nil {
 		if err := app.PluginManager.Start(context.Background()); err != nil {
 			log.Printf("Plugin manager started in degraded state: %v", err)
@@ -184,10 +192,8 @@ func runMainServer() {
 
 	log.Println("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := app.Server.Shutdown(ctx); err != nil {
+	log.Printf("Draining HTTP and %d WebSocket connections; timeout=%s", webSockets.Count(), drainTimeout)
+	if err := shutdownApplication(app.Server, webSockets, drainTimeout); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 

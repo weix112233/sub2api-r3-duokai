@@ -267,6 +267,9 @@ type OpenAIWSIngressHooks struct {
 	// that must be written into the upstream response.create frame.
 	MapRequestModel func(turn int, originalModel string) (string, error)
 	AfterTurn       func(turn int, result *OpenAIForwardResult, turnErr error)
+	// Unlike accounting observation, this is after the client terminal frame
+	// was successfully written. Lifecycle draining must use this boundary.
+	AfterClientTerminalWrite func(turn int)
 }
 
 func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {

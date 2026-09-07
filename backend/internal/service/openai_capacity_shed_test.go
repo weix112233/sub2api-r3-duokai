@@ -77,6 +77,22 @@ func TestStreamFailedEventCapacityShedRetriesOnSameAccount(t *testing.T) {
 	require.False(t, openAIStreamFailedEventRetryableOnSameAccount(nonPool, other, "boom"))
 }
 
+func TestCapacityShedCapsSameAccountRetryToOne(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{}
+	err := svc.newOpenAIStreamFailoverErrorWithModel(
+		nil,
+		&Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		false,
+		"",
+		[]byte(`{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"overloaded"}}}`),
+		"overloaded",
+		"gpt-6-astra",
+	)
+	require.Equal(t, 1, err.SameAccountRetryMax)
+	require.True(t, err.RequestScopedTransient)
+}
+
 func TestOpenAIHTTPCapacityShedIsRequestScopedForOAuthAccounts(t *testing.T) {
 	payload := []byte(`{"error":{"type":"server_error","message":"Our servers are currently overloaded. Please try again later."}}`)
 	failoverErr := newOpenAIUpstreamFailoverError(
@@ -245,10 +261,10 @@ func TestOpenAIStreamCapacityShedErrorFramePrecedingFailedStillFailsOver(t *test
 	require.Empty(t, rec.Body.String())
 }
 
-// 流中途（已有真实输出）降载时无法再 failover，此时必须把降载码改写为客户端
-// 可重试的 server_error 再通过唯一 response.failed 终态转发——Codex 对
-// server_is_overloaded/slow_down 判致命并终止会话，对其余错误码执行内置退避重试。
-func TestOpenAIStreamCapacityShedAfterOutputRewritesCodeForClient(t *testing.T) {
+// 流中途（已有真实输出）降载时无法再 failover，此时保留上游容量错误码。
+// 这样客户端快速进入明确的容量错误终态，不会把同一过载请求继续放大成
+// 多轮 server_error 客户端重试。消息与错误码都保留。
+func TestOpenAIStreamCapacityShedAfterOutputPreservesCodeForClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logSink, restore := captureStructuredLog(t)
 	defer restore()
@@ -289,17 +305,15 @@ func TestOpenAIStreamCapacityShedAfterOutputRewritesCodeForClient(t *testing.T) 
 	require.Contains(t, body, "partial")
 	require.NotContains(t, body, "event: error")
 	require.Equal(t, 1, strings.Count(body, "event: response.failed"))
-	require.Equal(t, 1, strings.Count(body, `"code":"server_error"`))
-	require.Contains(t, body, `"code":"server_error"`)
-	require.NotContains(t, body, "server_is_overloaded")
+	require.Equal(t, 1, strings.Count(body, `"code":"server_is_overloaded"`))
+	require.Contains(t, body, `"code":"server_is_overloaded"`)
 	require.Contains(t, body, "Our servers are currently overloaded")
 	require.True(t, logSink.ContainsMessage("gateway.failover_suppressed_after_semantic_output"))
 	require.True(t, logSink.ContainsFieldValue("path", "native_sse"))
 	require.True(t, logSink.ContainsFieldValue("upstream_request_id", "rid-shed-after-output"))
 }
 
-// helper 单测：只有降载码被改写，其余错误码（尤其 rate_limit_exceeded，客户端
-// 依赖其原码解析重试延时）必须原样保留。
+// helper 单测：容量降载错误码以及其他错误码都必须原样保留。
 func TestSanitizeOpenAICapacityShedErrorCodeForClient(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -308,28 +322,40 @@ func TestSanitizeOpenAICapacityShedErrorCodeForClient(t *testing.T) {
 		wantContain string
 	}{
 		{
-			name:        "failed事件嵌套code改写",
+			name:        "failed事件嵌套code保留",
 			payload:     `{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"overloaded"}}}`,
-			wantChanged: true,
-			wantContain: `"code":"server_error"`,
+			wantChanged: false,
+			wantContain: `"code":"server_is_overloaded"`,
 		},
 		{
-			name:        "error帧裸code改写",
+			name:        "error帧裸code保留",
 			payload:     `{"type":"error","error":{"code":"slow_down","message":"slow down"}}`,
-			wantChanged: true,
-			wantContain: `"code":"server_error"`,
+			wantChanged: false,
+			wantContain: `"code":"slow_down"`,
 		},
 		{
-			name:        "failed事件只有过载文案时补充code",
+			name:        "failed事件只有过载文案补充容量code",
 			payload:     `{"type":"response.failed","response":{"error":{"message":"Our servers are currently overloaded. Please try again later."}}}`,
 			wantChanged: true,
-			wantContain: `"code":"server_error"`,
+			wantContain: `"code":"server_is_overloaded"`,
 		},
 		{
-			name:        "error帧只有过载文案时补充code",
+			name:        "error帧只有过载文案补充容量code",
 			payload:     `{"type":"error","error":{"message":"Server is overloaded. Please try again later."}}`,
 			wantChanged: true,
-			wantContain: `"code":"server_error"`,
+			wantContain: `"code":"server_is_overloaded"`,
+		},
+		{
+			name:        "rate_limit_with_capacity_message_preserves_code",
+			payload:     `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Our servers are currently overloaded."}}}`,
+			wantChanged: false,
+			wantContain: `"code":"rate_limit_exceeded"`,
+		},
+		{
+			name:        "authorization_with_capacity_message_preserves_code",
+			payload:     `{"type":"error","error":{"code":"permission_denied","message":"Our servers are currently overloaded."}}`,
+			wantChanged: false,
+			wantContain: `"code":"permission_denied"`,
 		},
 		{
 			name:        "rate_limit不改写",
@@ -355,10 +381,12 @@ func TestSanitizeOpenAICapacityShedErrorCodeForClient(t *testing.T) {
 			out, changed := sanitizeOpenAICapacityShedErrorCodeForClient([]byte(tc.payload))
 			require.Equal(t, tc.wantChanged, changed)
 			require.Contains(t, string(out), tc.wantContain)
-			if changed {
-				require.NotContains(t, string(out), "server_is_overloaded")
-				require.NotContains(t, string(out), "slow_down")
+			if !tc.wantChanged {
+				require.Equal(t, tc.payload, string(out))
 			}
+			replayed, changedAgain := sanitizeOpenAICapacityShedErrorCodeForClient(out)
+			require.False(t, changedAgain)
+			require.Equal(t, out, replayed)
 		})
 	}
 }

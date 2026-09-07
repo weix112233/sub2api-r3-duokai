@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
@@ -127,7 +128,11 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	defer func() { _ = conn.CloseNow() }()
+	drainSession := wsdrain.Track(c.Request.Context(), conn, true)
+	defer func() {
+		_ = conn.CloseNow()
+		drainSession.Release()
+	}()
 
 	started := time.Now()
 	audioObserved, proxyErr := h.gatewayService.ProxyGrokRealtimeConn(c.Request.Context(), c, conn, upstream)

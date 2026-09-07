@@ -24,6 +24,7 @@ import (
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -604,6 +605,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
@@ -851,7 +853,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
-					if !failoverErr.ShouldRetryNextAccount() {
+					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1335,6 +1337,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	effectiveMappedModel := preferredMappedModel
@@ -1526,7 +1529,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
-					if !failoverErr.ShouldRetryNextAccount() {
+					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -2361,8 +2364,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		)
 		return
 	}
+	drainSession := wsdrain.Track(ctx, wsConn, false)
 	defer func() {
 		_ = wsConn.CloseNow()
+		drainSession.Release()
 	}()
 	wsConn.SetReadLimit(service.ResolveOpenAIWSClientReadLimitBytes(h.cfg))
 
@@ -2544,6 +2549,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
@@ -2578,7 +2584,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, failoverErr)
 		}
 		releaseAccountSlot()
-		if !failoverErr.ShouldRetryNextAccount() {
+		if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
 		}
@@ -3014,7 +3020,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 
 		for {
-			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
+			attemptHooks, finishAttempt, admitted := openAIDrainAttemptHooks(hooks, drainSession)
+			if !admitted {
+				closeOpenAIClientWS(wsConn, coderws.StatusServiceRestart, "server restarting")
+				return
+			}
+			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, attemptHooks)
+			finishAttempt()
 			if err == nil {
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
 				return
@@ -3372,7 +3384,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		if status <= 0 {
 			status = http.StatusServiceUnavailable
 		}
-		h.handleStreamingAwareError(c, status, "server_error", failoverErr.ClientMessage, streamStarted)
+		h.handleStreamingAwareErrorWithCode(c, status, "server_error", "server_is_overloaded", failoverErr.ClientMessage, streamStarted, false)
 		return
 	}
 	statusCode := failoverErr.StatusCode
@@ -3514,7 +3526,11 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 		// 通用 `event: error` 帧不被识别为终止事件，会导致
 		// "stream closed before response.completed"。
 		if inboundIsResponses(c) {
-			if writeResponsesFailedSSE(c, errType, message) {
+			responseCode := errType
+			if code != "" {
+				responseCode = code
+			}
+			if writeResponsesFailedSSE(c, responseCode, message) {
 				return
 			}
 		}

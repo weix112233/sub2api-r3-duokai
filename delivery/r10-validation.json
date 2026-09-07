@@ -1,0 +1,62 @@
+{
+  "schema": "sub2api-r10-portable-validation.v1",
+  "artifactKind": "source_delivery",
+  "baseCommit": "d9e796f",
+  "candidateBinaryBuilt": false,
+  "candidateDeployed": false,
+  "validationOrigin": "existing local execution reports, not remote CI",
+  "deliveryChecks": {
+    "nativeSourceWhitespaceCheck": "passed",
+    "nativeHighConfidenceCredentialPatternDiffCheck": "no_matching_changed_files",
+    "credentialCheckScope": "selected high-confidence patterns in staged text changes, not a comprehensive secret audit",
+    "customSummaryAudit": "not_executed_PreToolUse_denied",
+    "generatedVendorWhitespaceWarnings": 1,
+    "generatedVendorPreserved": true
+  },
+  "backendTaggedUnit": {
+    "passedTestEvents": 18395,
+    "failedTestEvents": 0,
+    "exitCode": 0,
+    "completedAt": "2026-09-07T06:31:34.976+08:00",
+    "reportSha256": "c1e8f92d448f278bc83f7b14dc60bd5f295b924f358a0f33424ab09a279ab9e2"
+  },
+  "selectedRace": {
+    "passedTestEvents": 28,
+    "failedTestEvents": 0,
+    "exitCode": 0,
+    "completedAt": "2026-09-07T06:29:34.287+08:00",
+    "reportSha256": "bd89cca016c1eef0250380e0857fba6f8677780f651ef3a4b6cead4124184a33"
+  },
+  "redisAclDryRun": {
+    "passedChecks": 8,
+    "actualMutation": false,
+    "completedAt": "2026-09-07T06:56:24.572+08:00",
+    "reportSha256": "7b0fb4375cf45dde937a7975a6eb50d41f5a5ea9ab70eb2ee76c0f8f325c40d6"
+  },
+  "r9Frontend": {
+    "fullTestsPassed": 1846,
+    "lintFiles": 775,
+    "lintErrors": 0,
+    "lintWarnings": 0,
+    "recordedProductionDependencyAdvisories": 0,
+    "rebuiltForThisSourceDelivery": false
+  },
+  "additionalBackendFileSha256": {
+    "backend/internal/service/openai_ws_state_store.go": "7aef1e937bd7d3e32aeecf7847c5469ed76ce53ca3bc782e8f62a4615fbca3ca",
+    "backend/internal/service/openai_http_owner_persistence_test.go": "ee03729d305c7018e2ff0150744f04f4773e128584ba03e008a61a1a09d9b13e",
+    "backend/internal/service/gateway_http_owner_cache_stub_test.go": "f368b2dc534a3d2d73ecd6e1107900708ff719a7b0806994fcedd913d62b7dcf",
+    "backend/internal/repository/http_response_owner_cache.go": "9a282e0ebfe2c133b210dd402d8403f3dc9f98c9462f18842eb5cb00f1bb4aad",
+    "backend/internal/repository/http_response_owner_cache_test.go": "9b004cb570744944d2de20d2e4a5e7e73898068a745dacdb302ae5cb2a1de622",
+    "backend/internal/repository/redis.go": "46fca0c42a1d90a28123605fe3a29ef5924266382386c89c4cacb2968be19197",
+    "backend/internal/repository/redis_test.go": "6db29ceeaea30466a4e700b9c4d884b492c0566ed2f41b97f8e928fe619e57d9",
+    "backend/internal/setup/setup.go": "0193088ac5a1d424e10beceb35b02ea7d587f0e79b55d323bf1dd43544d5f394",
+    "backend/internal/setup/redis_deadline_test.go": "e2e6185825c8444cd1c60a98be7fa2e848cde0ff3f09cce983e411c3c6829487"
+  },
+  "remainingAcceptance": [
+    "formal prebuild admission",
+    "fixed candidate build and binary verification",
+    "approved cutover and old-writer quiescence",
+    "real postdeployment ownership and continuation",
+    "representative resource, error, latency and accounting observation"
+  ]
+}

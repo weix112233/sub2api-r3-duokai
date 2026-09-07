@@ -16,7 +16,8 @@ FRONTEND_CRITICAL_VITEST := \
 	src/features/channel-monitor-v2/__tests__/monitorZoom.spec.ts
 
 # 一键编译前后端
-build: build-backend build-frontend
+build: build-frontend
+	@$(MAKE) -C backend build BUILD_TAGS=embed
 
 # 编译后端（复用 backend/Makefile）
 build-backend:

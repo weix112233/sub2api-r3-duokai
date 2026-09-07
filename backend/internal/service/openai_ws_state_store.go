@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -45,6 +46,17 @@ type openAIWSTurnStateBinding struct {
 type openAIWSSessionConnBinding struct {
 	connID    string
 	expiresAt time.Time
+}
+
+var (
+	ErrHTTPResponseOwnerConflict         = errors.New("response already belongs to another user")
+	ErrHTTPResponseOwnerCacheUnsupported = errors.New("cache does not support atomic response ownership")
+)
+
+// OpenAIHTTPResponseOwnerCache preserves the owner pair as one atomic binding.
+type OpenAIHTTPResponseOwnerCache interface {
+	SetHTTPResponseOwner(ctx context.Context, groupID int64, userKey, apiKeyKey string, userID, apiKeyID int64, ttl time.Duration) error
+	GetHTTPResponseOwnerPair(ctx context.Context, groupID int64, userKey, apiKeyKey string) (int64, int64, error)
 }
 
 // OpenAIWSStateStore 管理 WSv2 的粘连状态。
@@ -113,22 +125,30 @@ func (s *defaultOpenAIWSStateStore) BindHTTPResponseOwner(ctx context.Context, g
 	s.maybeCleanup()
 
 	mapKey := openAIWSResponseAccountMapKey(groupID, id)
+	if s.cache != nil {
+		cache, ok := s.cache.(OpenAIHTTPResponseOwnerCache)
+		if !ok {
+			return ErrHTTPResponseOwnerCacheUnsupported
+		}
+		// Ownership must outlive the completed request, within one finite I/O budget.
+		cacheCtx, cancel := withOpenAIWSStateStoreRedisPersistTimeout(ctx)
+		defer cancel()
+		return cache.SetHTTPResponseOwner(cacheCtx, groupID,
+			openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerUserPrefix, id),
+			openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerKeyPrefix, id),
+			userID, apiKeyID, ttl)
+	}
+
 	s.responseOwnerMu.Lock()
+	defer s.responseOwnerMu.Unlock()
+	if existing, ok := s.responseOwners[mapKey]; ok && time.Now().Before(existing.expiresAt) && existing.userID != userID {
+		return ErrHTTPResponseOwnerConflict
+	}
 	ensureBindingCapacity(s.responseOwners, mapKey, openAIWSStateStoreMaxEntriesPerMap)
 	s.responseOwners[mapKey] = openAIHTTPResponseOwnerBinding{
 		userID: userID, apiKeyID: apiKeyID, expiresAt: time.Now().Add(ttl),
 	}
-	s.responseOwnerMu.Unlock()
-
-	if s.cache == nil {
-		return nil
-	}
-	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
-	defer cancel()
-	if err := s.cache.SetSessionAccountID(cacheCtx, groupID, openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerUserPrefix, id), userID, ttl); err != nil {
-		return err
-	}
-	return s.cache.SetSessionAccountID(cacheCtx, groupID, openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerKeyPrefix, id), apiKeyID, ttl)
+	return nil
 }
 
 func (s *defaultOpenAIWSStateStore) GetHTTPResponseOwner(ctx context.Context, groupID int64, responseID string) (int64, int64, bool, error) {
@@ -140,33 +160,27 @@ func (s *defaultOpenAIWSStateStore) GetHTTPResponseOwner(ctx context.Context, gr
 
 	now := time.Now()
 	mapKey := openAIWSResponseAccountMapKey(groupID, id)
-	s.responseOwnerMu.RLock()
-	if binding, ok := s.responseOwners[mapKey]; ok && now.Before(binding.expiresAt) {
-		s.responseOwnerMu.RUnlock()
-		return binding.userID, binding.apiKeyID, true, nil
-	}
-	s.responseOwnerMu.RUnlock()
-
 	if s.cache == nil {
+		s.responseOwnerMu.RLock()
+		defer s.responseOwnerMu.RUnlock()
+		if binding, ok := s.responseOwners[mapKey]; ok && now.Before(binding.expiresAt) {
+			return binding.userID, binding.apiKeyID, true, nil
+		}
 		return 0, 0, false, nil
+	}
+	cache, ok := s.cache.(OpenAIHTTPResponseOwnerCache)
+	if !ok {
+		return 0, 0, false, ErrHTTPResponseOwnerCacheUnsupported
 	}
 	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
 	defer cancel()
-	userID, err := s.cache.GetSessionAccountID(cacheCtx, groupID, openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerUserPrefix, id))
-	if err != nil || userID <= 0 {
-		return 0, 0, false, err
-	}
-	apiKeyID, err := s.cache.GetSessionAccountID(cacheCtx, groupID, openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerKeyPrefix, id))
-	if err != nil || apiKeyID <= 0 {
+	userID, apiKeyID, err := cache.GetHTTPResponseOwnerPair(cacheCtx, groupID,
+		openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerUserPrefix, id),
+		openAIHTTPResponseOwnerCacheKey(openAIHTTPResponseOwnerKeyPrefix, id))
+	if err != nil || userID <= 0 || apiKeyID <= 0 {
 		return 0, 0, false, err
 	}
 
-	s.responseOwnerMu.Lock()
-	ensureBindingCapacity(s.responseOwners, mapKey, openAIWSStateStoreMaxEntriesPerMap)
-	s.responseOwners[mapKey] = openAIHTTPResponseOwnerBinding{
-		userID: userID, apiKeyID: apiKeyID, expiresAt: now.Add(time.Minute),
-	}
-	s.responseOwnerMu.Unlock()
 	return userID, apiKeyID, true, nil
 }
 

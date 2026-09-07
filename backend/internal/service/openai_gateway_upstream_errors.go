@@ -318,7 +318,9 @@ func newOpenAIUpstreamFailoverError(
 	upstreamMsg string,
 	retryableOnSameAccount bool,
 ) *UpstreamFailoverError {
-	requestScopedCapacity := isOpenAIRequestScopedCapacityShed(upstreamMsg, responseBody)
+	requestScopedCapacity := statusCode != http.StatusUnauthorized &&
+		statusCode != http.StatusForbidden && statusCode != http.StatusTooManyRequests &&
+		isOpenAIRequestScopedCapacityShed(upstreamMsg, responseBody)
 	failoverErr := &UpstreamFailoverError{
 		StatusCode:             statusCode,
 		ResponseBody:           responseBody,
@@ -345,8 +347,8 @@ func newOpenAIUpstreamFailoverError(
 		failoverErr.ClientStatusCode = http.StatusBadGateway
 		failoverErr.ClientMessage = openAIUpstreamAccessUnavailableClientMessage
 	} else if requestScopedCapacity {
-		// Preserve the provider's actionable overload message after gateway
-		// retries are exhausted, but expose it as a retryable server_error.
+		// All HTTP and stream adapters share this capacity retry cap.
+		failoverErr.SameAccountRetryMax = 1
 		failoverErr.ClientStatusCode = http.StatusServiceUnavailable
 		failoverErr.ClientMessage = openAICapacityShedClientMessage(upstreamMsg, responseBody)
 	}

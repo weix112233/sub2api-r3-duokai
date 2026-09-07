@@ -151,6 +151,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	stopJSONKeepalive := func() {}
 	jsonKeepaliveStarted := false
@@ -305,6 +306,10 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 							zap.Int64("account_id", account.ID),
 							zap.Int("upstream_status", failoverErr.StatusCode),
 						)
+						return
+					}
+					if capacityRetryBudget.exhausted(failoverErr) {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
 					if shouldRetrySameAccount(account, failoverErr) {

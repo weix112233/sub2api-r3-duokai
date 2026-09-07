@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -19,37 +20,38 @@ type Detection struct {
 }
 
 var (
-	strongJailbreakPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`\b(ignore|disregard|forget|override)\b.{0,80}\b(previous|prior|system|developer|safety|policy|instructions?|rules?)\b`),
-		regexp.MustCompile(`\b(reveal|show|print|output|dump|repeat)\b.{0,80}\b(system|developer|hidden)\b.{0,40}\b(prompt|message|instructions?)\b`),
-		regexp.MustCompile(`忽略.{0,30}(之前|以上|先前).{0,20}(指令|指示|规则)`),
-		regexp.MustCompile(`输出.{0,30}(系统|开发者).{0,30}(提示词|指令|消息)`),
+	// Match a verb and its instruction/security object, not unrelated words
+	// anywhere in a request. Compaction still catches separated-letter attacks.
+	compactJailbreakPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?:ignore|disregard|forget|override)(?:(?:all|the|any|your|my|of|these|those)){0,5}(?:previous|prior|above|earlier|existing|system|developer|safety|security|hidden|policy|all)(?:(?:all|the|any|your|of|previous|prior|system|developer|safety|security|policy)){0,5}(?:instructions?|rules?|prompts?|polic(?:y|ies)|guardrails?)`),
+		regexp.MustCompile(`(?:reveal|show|print|output|dump|repeat)(?:(?:the|your|all|full|entire|hidden|original|exact|verbatim)){0,5}(?:systemprompt|systeminstructions|developermessage|developerprompt|developerinstructions|hiddeninstructions|secretprompt)`),
+		regexp.MustCompile(`(?:忽略|无视|覆盖)(?:(?:之前|先前|以上|所有|全部|此前|系统|开发者|安全|的)){0,8}(?:指令|指示|规则|安全策略|系统提示词|开发者消息)`),
+		regexp.MustCompile(`(?:输出|显示|泄露|展示|打印)(?:(?:完整|全部|原始|隐藏|你的|的)){0,5}(?:系统提示词|系统指令|开发者消息|开发者指令|隐藏指令)`),
 	}
-	overridePattern     = regexp.MustCompile(`\b(ignore|disregard|forget|override|follow only)\b|忽略|无视|覆盖`)
-	secretPattern       = regexp.MustCompile(`\b(system prompt|developer message|hidden instructions?|secret prompt)\b|系统提示词|开发者消息|隐藏指令`)
-	rolePattern         = regexp.MustCompile(`\b(unrestricted|no safety|without restrictions?|you are now)\b|解除限制|没有安全限制`)
-	analysisPattern     = regexp.MustCompile(`\b(analy[sz]e|analysis|classify|classification|detect|review|explain)\b|分析|研判|分类|检测|审查|解释`)
-	activeBypassPattern = regexp.MustCompile(
-		`\b(bypass|disable|remove|turn off)\b.{0,60}\b(safety|guardrails?|policy|restrictions?)\b|` +
-			`绕过.{0,30}(安全|限制|护栏|策略)|解除.{0,20}(安全|限制|护栏)`,
+	analysisPattern      = regexp.MustCompile(`\b(analy[sz]e|analysis|classify|classification|detect|review|explain)\b|分析|研判|分类|检测|审查|解释`)
+	compactBypassPattern = regexp.MustCompile(
+		`(?:bypass|disable|remove|turnoff)(?:(?:all|the|any|your|existing|of)){0,5}(?:safety|security|guardrails?|policy|restrictions?)|` +
+			`(?:绕过|解除)(?:(?:全部|所有|这些|的)){0,5}(?:安全|限制|护栏|策略)`,
 	)
-	defensiveBypassPattern = regexp.MustCompile(
-		`\b(prevent|stop|block|avoid)\b.{0,80}\b(bypass(?:ing|ed)?|disabl(?:e|ing|ed)|remov(?:e|ing|ed)|jailbreak(?:ing|ed)?)\b|` +
-			`\b(detect|identify|mitigate|defend against|protect against)\b.{0,80}\b(attempts?\s+to\s+bypass|bypassing|jailbreak(?:s|ing|ed| attempts?)?)\b|` +
-			`(?:防止|阻止|拦截).{0,50}(?:绕过|越狱|解除限制)|` +
-			`(?:检测|识别|缓解|防御).{0,50}(?:越狱|绕过行为|绕过尝试|绕过攻击)`,
+	compactDefensivePrefixPattern = regexp.MustCompile(
+		`(?:prevent|stop|block|avoid)(?:(?:clients?|users?|attackers?|attempts?|from|to)){0,4}$|` +
+			`(?:detect|identify|mitigate|defendagainst|protectagainst)(?:attemptsto)?$|` +
+			`(?:防止|阻止|拦截|检测|识别|缓解|防御)$`,
 	)
-	activationPattern = regexp.MustCompile(
-		`\b(activate|enable|enter|switch to|act as|become|you are now)\b.{0,50}\b(jailbreak mode|dan mode|unrestricted mode|unrestricted assistant|uncensored assistant)\b|` +
-			`(?:启用|开启|进入|切换到|扮演|变成).{0,30}(?:越狱|dan|无限制|无审查)(?:模式)?`,
+	compactActivationPattern = regexp.MustCompile(
+		`(?:activate|enable|enter|switchto)(?:jailbreak|dan|unrestricted)mode|` +
+			`(?:actas|become|youarenow)(?:dan|(?:an?)?(?:unrestricted|uncensored)assistant)|` +
+			`(?:activate|enable)(?:an?)?uncensoredassistant|` +
+			`(?:启用|开启|进入|切换到|扮演|变成)(?:越狱|dan|无限制模式|无审查模式)`,
 	)
 	noExecutePattern = regexp.MustCompile(
 		`\b(do not|don't|never|must not)\b.{0,40}\b(execute|follow|obey|comply|perform|act on)\b|` +
 			`不要.{0,20}(执行|遵循|服从|照做)|不得.{0,20}(执行|遵循|服从|照做)|仅分析不执行`,
 	)
-	quotedSamplePattern  = regexp.MustCompile(`\b(quoted|quote|sample|example|payload|attack string|jailbreak prompt)\b|引用|样本|示例|攻击文本|越狱提示词`)
-	explicitQuotePattern = regexp.MustCompile("(?s)\"[^\"\\n]+\"|“[^”\\n]+”|```.+?```")
-	analysisLabelPattern = regexp.MustCompile(`\b(quoted\s+)?jailbreak\s+(sample|prompt)\b|越狱提示词(样本)?`)
+	quotedSamplePattern          = regexp.MustCompile(`\b(quoted|quote|sample|example|payload|attack string|jailbreak prompt)\b|引用|样本|示例|攻击文本|越狱提示词`)
+	explicitQuotePattern         = regexp.MustCompile("(?s)\"[^\"\\n]+\"|“[^”\\n]+”|```.+?```")
+	analysisLabelPattern         = regexp.MustCompile(`\b(quoted\s+)?jailbreak\s+(sample|prompt)\b|越狱提示词(样本)?`)
+	compactNegationPrefixPattern = regexp.MustCompile(`(?:donot|dont|never|mustnot|shouldnot|shouldnt|without|不要|不得|切勿|不能|不应|禁止|不可)$`)
 )
 
 // DetectJailbreak scans only bounded request bytes and never returns the
@@ -63,21 +65,18 @@ func DetectJailbreak(body []byte, maxBytes int) (bool, Detection) {
 		return false, Detection{}
 	}
 
-	text, encodingLimit := decodePromptUnicodeEscapes(norm.NFKC.String(extractPromptText(body)))
-	if encodingLimit {
-		return true, Detection{Reason: ReasonPromptEncodingLimit, SignalCount: 1}
-	}
-	text = normalizePrompt(text)
-	if text == "" {
-		return false, Detection{}
-	}
-	if isExplicitSecurityAnalysis(text) {
-		return false, Detection{}
-	}
-
-	blocked, signals := containsJailbreakSignals(text)
-	if blocked {
-		return true, Detection{Reason: ReasonPromptJailbreak, SignalCount: signals}
+	for _, message := range extractPromptTexts(body) {
+		text, encodingLimit := decodePromptUnicodeEscapes(norm.NFKC.String(message))
+		if encodingLimit {
+			return true, Detection{Reason: ReasonPromptEncodingLimit, SignalCount: 1}
+		}
+		text = normalizePrompt(text)
+		if text == "" || isExplicitSecurityAnalysis(text) {
+			continue
+		}
+		if blocked, signals := containsJailbreakSignals(text); blocked {
+			return true, Detection{Reason: ReasonPromptJailbreak, SignalCount: signals}
+		}
 	}
 	return false, Detection{}
 }
@@ -107,54 +106,62 @@ func rawBodyMayContainJailbreak(body []byte) bool {
 	return hasUnicodeEscape || rawCompactMayContainJailbreak(builder.String())
 }
 
-func extractPromptText(body []byte) string {
+func extractPromptTexts(body []byte) []string {
 	var root map[string]any
 	if json.Unmarshal(body, &root) != nil {
-		return string(body)
+		return []string{string(body)}
 	}
 
-	var builder strings.Builder
+	var texts []string
 	if messages, ok := root["messages"]; ok {
-		appendRoleMessages(&builder, messages, false)
+		appendRoleMessages(&texts, messages, false)
 	}
 	if input, ok := root["input"]; ok {
-		appendResponsesInput(&builder, input)
+		appendResponsesInput(&texts, input)
 	}
 	if contents, ok := root["contents"]; ok {
-		appendRoleMessages(&builder, contents, true)
+		appendRoleMessages(&texts, contents, true)
 	}
 	if prompt, ok := root["prompt"]; ok {
-		appendPromptValue(&builder, prompt, 0)
+		appendPromptText(&texts, prompt)
 	}
 	if query, ok := root["query"]; ok {
-		appendPromptValue(&builder, query, 0)
+		appendPromptText(&texts, query)
 	}
-	return builder.String()
+	return texts
 }
 
-func appendResponsesInput(builder *strings.Builder, input any) {
+func appendPromptText(texts *[]string, content any) {
+	var builder strings.Builder
+	appendPromptValue(&builder, content, 0)
+	if builder.Len() > 0 {
+		*texts = append(*texts, builder.String())
+	}
+}
+
+func appendResponsesInput(texts *[]string, input any) {
 	switch input := input.(type) {
 	case string:
-		appendPromptValue(builder, input, 0)
+		appendPromptText(texts, input)
 	case []any:
 		for _, item := range input {
 			switch item := item.(type) {
 			case string:
-				appendPromptValue(builder, item, 0)
+				appendPromptText(texts, item)
 			case map[string]any:
 				if isUserRole(stringValue(item["role"]), false) {
-					appendPromptValue(builder, item["content"], 0)
+					appendPromptText(texts, item["content"])
 				}
 			}
 		}
 	case map[string]any:
 		if isUserRole(stringValue(input["role"]), false) {
-			appendPromptValue(builder, input["content"], 0)
+			appendPromptText(texts, input["content"])
 		}
 	}
 }
 
-func appendRoleMessages(builder *strings.Builder, messages any, allowMissingUserRole bool) {
+func appendRoleMessages(texts *[]string, messages any, allowMissingUserRole bool) {
 	items, ok := messages.([]any)
 	if !ok {
 		return
@@ -168,12 +175,9 @@ func appendRoleMessages(builder *strings.Builder, messages any, allowMissingUser
 		if !isUserRole(role, allowMissingUserRole) {
 			continue
 		}
-		if content, ok := message["content"]; ok {
-			appendPromptValue(builder, content, 0)
-		}
-		if parts, ok := message["parts"]; ok {
-			appendPromptValue(builder, parts, 0)
-		}
+		// Content blocks of one message stay together; different messages cannot
+		// grant each other an analysis exception or fabricate combined signals.
+		appendPromptText(texts, []any{message["content"], message["parts"]})
 	}
 }
 
@@ -260,44 +264,67 @@ func isExplicitSecurityAnalysis(text string) bool {
 }
 
 func containsJailbreakSignals(text string) (bool, int) {
+	compact, boundaries := compactPromptSignals(text)
 	signals := 0
-	for _, pattern := range strongJailbreakPatterns {
-		if pattern.MatchString(text) {
+	for _, pattern := range compactJailbreakPatterns {
+		if hasActivePromptMatch(compact, boundaries, pattern, false) {
 			signals++
 		}
 	}
-	compact := compactPromptSignals(text)
-	defensiveDiscussion := defensiveBypassPattern.MatchString(text)
-	if activeBypassPattern.MatchString(text) && !defensiveDiscussion {
+	if hasActivePromptMatch(compact, boundaries, compactBypassPattern, true) {
 		signals++
 	}
-	if activationPattern.MatchString(text) {
+	if hasActivePromptMatch(compact, boundaries, compactActivationPattern, false) {
 		signals++
 	}
-	compactBypass := containsAny(compact, "bypass", "disable", "remove", "turnoff", "绕过", "解除") &&
-		containsAny(compact, "safety", "guardrail", "policyrestriction", "安全", "限制", "护栏", "策略") &&
-		!defensiveDiscussion
-	return signals > 0 ||
-		hasCompactJailbreakSignals(compact) ||
-		compactBypass ||
-		hasCompactActivationSignals(compact) ||
-		(overridePattern.MatchString(text) && (secretPattern.MatchString(text) || rolePattern.MatchString(text))), signals
+	return signals > 0, signals
+}
+
+func hasActivePromptMatch(compact string, boundaries []int, pattern *regexp.Regexp, allowDefensive bool) bool {
+	for offset := 0; offset < len(compact); {
+		match := pattern.FindStringIndex(compact[offset:])
+		if match == nil {
+			break
+		}
+		start := offset + match[0]
+		prefixStart := max(0, start-128)
+		boundary := sort.Search(len(boundaries), func(i int) bool { return boundaries[i] > start })
+		if boundary > 0 {
+			prefixStart = max(prefixStart, boundaries[boundary-1])
+		}
+		prefix := compact[prefixStart:start]
+		if !compactNegationPrefixPattern.MatchString(prefix) &&
+			!(allowDefensive && compactDefensivePrefixPattern.MatchString(prefix)) {
+			return true
+		}
+		// A negated action does not exempt subsequent actions in this message.
+		offset += match[1]
+	}
+	return false
 }
 
 func normalizePrompt(raw string) string {
 	var builder strings.Builder
 	builder.Grow(len(raw))
+	space := false
 	for _, r := range strings.ToLower(norm.NFKC.String(raw)) {
 		switch {
 		case unicode.Is(unicode.Cf, r):
 			continue
+		case r == '\n' || r == '\r':
+			builder.WriteByte('\n')
+			space = true
 		case unicode.IsSpace(r):
-			builder.WriteByte(' ')
+			if !space {
+				builder.WriteByte(' ')
+			}
+			space = true
 		default:
 			builder.WriteRune(r)
+			space = false
 		}
 	}
-	return strings.Join(strings.Fields(builder.String()), " ")
+	return strings.TrimSpace(builder.String())
 }
 
 const maxPromptUnicodeDecodeLayers = 3
@@ -359,71 +386,34 @@ func promptUnicodeEscapeAt(text string, index int) (rune, int) {
 	return utf16.DecodeRune(first, rune(low)), 12
 }
 
-func compactPromptSignals(text string) string {
+func compactPromptSignals(text string) (string, []int) {
 	var builder strings.Builder
 	builder.Grow(len(text))
-	for _, r := range text {
+	var boundaries []int
+	for index, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			builder.WriteRune(r)
+		} else if strings.ContainsRune("\n\r。！？；!?;,:，：", r) ||
+			(r == '.' && (index+1 == len(text) || text[index+1] == ' ' || text[index+1] == '\n')) {
+			// Keep clause boundaries for negation without preventing detection of
+			// a positive attack whose letters/words were split by punctuation.
+			if len(boundaries) == 0 || boundaries[len(boundaries)-1] != builder.Len() {
+				boundaries = append(boundaries, builder.Len())
+			}
 		}
 	}
-	return builder.String()
-}
-
-func hasCompactJailbreakSignals(compact string) bool {
-	override := containsAny(compact, "ignore", "disregard", "forget", "override", "followonly", "忽略", "无视", "覆盖")
-	instructionTarget := containsAny(compact, "previousinstruction", "priorinstruction", "systeminstruction", "developerinstruction", "safetypolicy", "policyrule", "instructions", "rules", "之前指令", "以上指令", "先前指令", "安全策略")
-	disclosure := containsAny(compact, "reveal", "show", "print", "output", "dump", "repeat", "输出", "显示", "泄露")
-	secret := containsAny(compact, "systemprompt", "developermessage", "hiddeninstructions", "secretprompt", "系统提示词", "开发者消息", "隐藏指令")
-	role := containsAny(compact, "unrestricted", "nosafety", "withoutrestrictions", "youarenow", "解除限制", "没有安全限制")
-	negatedDisclosure := containsAny(compact, "withoutrevealing", "donotreveal", "neverreveal", "mustnotreveal", "不要泄露", "不得泄露", "不泄露")
-	return (override && (instructionTarget || secret || role)) ||
-		(disclosure && secret && !negatedDisclosure)
+	return builder.String(), boundaries
 }
 
 func rawCompactMayContainJailbreak(compact string) bool {
-	bypass := containsAny(compact, "bypass", "disable", "remove", "turnoff", "绕过", "解除")
-	safety := containsAny(compact, "safety", "guardrail", "policyrestriction", "安全", "限制", "护栏", "策略")
-	return hasCompactJailbreakSignals(compact) ||
-		(bypass && safety) ||
-		hasCompactActivationSignals(compact) ||
-		containsAny(compact, "jailbreak", "越狱")
-}
-
-func hasCompactActivationSignals(compact string) bool {
+	// Over-approximate the detector even when a verb is split across content
+	// blocks. This fast path grants no exemption and makes no security decision.
 	return containsAny(
 		compact,
-		"activatejailbreakmode",
-		"enablejailbreakmode",
-		"enterjailbreakmode",
-		"switchtojailbreakmode",
-		"activatedanmode",
-		"enabledanmode",
-		"enterdanmode",
-		"switchtodanmode",
-		"actasdan",
-		"becomedan",
-		"youarenowdan",
-		"activateunrestrictedmode",
-		"enableunrestrictedmode",
-		"enterunrestrictedmode",
-		"switchtounrestrictedmode",
-		"actasunrestrictedassistant",
-		"becomeunrestrictedassistant",
-		"youarenowunrestrictedassistant",
-		"activateuncensoredassistant",
-		"enableuncensoredassistant",
-		"actasuncensoredassistant",
-		"启用越狱",
-		"开启越狱",
-		"进入越狱",
-		"切换到越狱",
-		"扮演dan",
-		"变成dan",
-		"启用无限制模式",
-		"开启无限制模式",
-		"启用无审查模式",
-		"开启无审查模式",
+		"ignore", "disregard", "forget", "override", "reveal", "show",
+		"print", "output", "dump", "repeat", "instructions", "rules",
+		"prompt", "message", "safety", "security", "guardrail", "policy",
+		"restriction", "jailbreak", "dan", "unrestricted", "uncensored",
 	)
 }
 

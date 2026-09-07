@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import checker from 'vite-plugin-checker'
 import { resolve } from 'path'
+import { lazyPaymentChunkGuard } from './build/payment-chunk-guard'
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
@@ -86,6 +87,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       vue(),
+      lazyPaymentChunkGuard(),
       checker({
         vueTsc: true
       }),
@@ -142,6 +144,9 @@ export default defineConfig(({ mode }) => {
             // Stripe 仅在支付流程中按需加载，避免进入首页公共依赖。
             if (id.includes('/@stripe/stripe-js/')) {
               return 'vendor-stripe'
+            }
+            if (id.includes('/@airwallex/components-sdk/')) {
+              return 'vendor-airwallex'
             }
 
             // 其他小型第三方库合并

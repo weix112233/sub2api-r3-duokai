@@ -151,7 +151,7 @@ func TestOpenAI429FastPath_SparkQuotaOnlyBlocksSparkModel(t *testing.T) {
 	require.Greater(t, time.Until(repo.lastModelRateLimitedUntil), 6*24*time.Hour)
 }
 
-func TestOpenAI429FastPath_SparkTransient429UsesShortFallback(t *testing.T) {
+func TestOpenAI429FastPath_SparkTransient429UsesConfiguredFallback(t *testing.T) {
 	repo := &oauth429RateLimitRepo{}
 	rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	svc := &OpenAIGatewayService{rateLimitService: rateLimits}
@@ -173,7 +173,7 @@ func TestOpenAI429FastPath_SparkTransient429UsesShortFallback(t *testing.T) {
 
 	require.False(t, shouldDisable)
 	require.Equal(t, 1, repo.setModelRateLimitCalls)
-	require.Less(t, time.Until(repo.lastModelRateLimitedUntil), time.Minute)
+	require.WithinDuration(t, time.Now().Add(time.Duration(defaultRateLimit429CooldownSeconds)*time.Second), repo.lastModelRateLimitedUntil, 5*time.Second)
 	require.Greater(t, time.Until(repo.lastModelRateLimitedUntil), time.Second)
 }
 
@@ -244,8 +244,9 @@ func TestOpenAIWSErrorEvent_OrdinaryModelIgnoresHandshakeQuotaHeaders(t *testing
 
 	svc.persistOpenAIWSRateLimitSignal(context.Background(), account, headers, payload, "rate_limit_exceeded", "rate_limit_error", "quota exhausted", "gpt-5.3-codex")
 
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
-	require.Zero(t, repo.setRateLimitedCalls)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Equal(t, 1, repo.setRateLimitedCalls)
+	require.WithinDuration(t, time.Now().Add(time.Duration(defaultRateLimit429CooldownSeconds)*time.Second), repo.lastRateLimitedUntil, 5*time.Second)
 }
 
 func TestOpenAIWSErrorEvent_SparkQuotaUsesHandshakeQuotaHeaders(t *testing.T) {
@@ -324,9 +325,9 @@ func TestOpenAIStream429IgnoresSuccessfulQuotaSnapshotHeaders(t *testing.T) {
 	require.True(t, ok)
 	blockedUntil, ok := value.(time.Time)
 	require.True(t, ok)
-	require.Less(t, time.Until(blockedUntil), time.Minute, "stream 429 must not inherit the normal seven-day quota snapshot")
+	require.WithinDuration(t, time.Now().Add(time.Duration(defaultRateLimit429CooldownSeconds)*time.Second), blockedUntil, 5*time.Second, "stream 429 uses configured cooldown, not a seven-day successful handshake snapshot")
 	if !repo.lastRateLimitedUntil.IsZero() {
-		require.Less(t, time.Until(repo.lastRateLimitedUntil), time.Minute)
+		require.WithinDuration(t, blockedUntil, repo.lastRateLimitedUntil, 5*time.Second)
 	}
 }
 
@@ -701,8 +702,8 @@ func TestOpenAIOAuth429_NonmatchingModelTempRuleKeepsAccountRuntimeBlock(t *test
 	)
 
 	require.False(t, shouldDisable)
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
-	require.True(t, svc.shouldRetryOpenAIOAuth429OnSameAccount(account, http.StatusTooManyRequests, false))
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.False(t, svc.shouldRetryOpenAIOAuth429OnSameAccount(account, http.StatusTooManyRequests, false))
 	require.Empty(t, repo.modelRateLimitCalls)
 }
 

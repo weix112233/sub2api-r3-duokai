@@ -25,6 +25,7 @@ func TestBuildRedisOptions(t *testing.T) {
 	}
 
 	opts := buildRedisOptions(cfg)
+	require.True(t, opts.ContextTimeoutEnabled)
 	require.Equal(t, "localhost:6379", opts.Addr)
 	require.Equal(t, "app-user", opts.Username)
 	require.Equal(t, "secret", opts.Password)

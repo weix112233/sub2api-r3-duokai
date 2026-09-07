@@ -143,6 +143,7 @@ type FailoverState struct {
 	LastFailoverErr       *service.UpstreamFailoverError
 	ForceCacheBilling     bool
 	hasBoundSession       bool
+	capacityRetryBudget   openAICapacityRetryBudget
 
 	// profitVetoedAccountIDs 记录被分组利润门终检否决的账号，是 FailedAccountIDs
 	// 的子集。之所以单独维护：HandleSelectionExhausted 的 503 退避分支会清空
@@ -217,7 +218,7 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverCanceled
 	}
 	s.LastFailoverErr = failoverErr
-	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
+	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() || s.capacityRetryBudget.exhausted(failoverErr) {
 		return FailoverExhausted
 	}
 
@@ -302,6 +303,11 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 	// 不代表账号耗尽，直接按取消终止。
 	if ctx.Err() != nil {
 		return FailoverCanceled
+	}
+
+	// Re-selecting the same exhausted pool does not reset a capacity incident.
+	if s.LastFailoverErr.IsOpenAICapacityShed() {
+		return FailoverExhausted
 	}
 
 	if s.LastFailoverErr != nil &&

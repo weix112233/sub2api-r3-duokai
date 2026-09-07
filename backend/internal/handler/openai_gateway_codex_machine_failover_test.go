@@ -11,11 +11,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -57,6 +59,7 @@ type machineFailoverUpstream struct {
 	headers  []http.Header
 	bodies   [][]byte
 	failByID map[int64]int
+	failBody string
 }
 
 func (u *machineFailoverUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -71,10 +74,14 @@ func (u *machineFailoverUpstream) Do(req *http.Request, _ string, accountID int6
 	status := u.failByID[accountID]
 	u.mu.Unlock()
 	if status > 0 {
+		failureBody := u.failBody
+		if failureBody == "" {
+			failureBody = `{"error":{"message":"upstream unavailable"}}`
+		}
 		return &http.Response{
 			StatusCode: status,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(bytes.NewBufferString(`{"error":{"message":"upstream unavailable"}}`)),
+			Body:       io.NopCloser(bytes.NewBufferString(failureBody)),
 		}, nil
 	}
 	if bytes.Contains(body, []byte(`"stream":true`)) {
@@ -99,6 +106,10 @@ func (u *machineFailoverUpstream) snapshot() ([]int64, []http.Header, [][]byte) 
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return append([]int64(nil), u.hits...), append([]http.Header(nil), u.headers...), append([][]byte(nil), u.bodies...)
+}
+
+func (u *machineFailoverUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, concurrency)
 }
 
 func machineFailoverTurnMetadata(root string) string {
@@ -154,7 +165,41 @@ func newCodexMachineFailoverHandler(t *testing.T) (*machineFailoverUpstream, *gi
 		c.Next()
 	})
 	router.POST("/openai/v1/responses", h.Responses)
+	router.POST("/openai/v1/chat/completions", h.ChatCompletions)
 	return upstream, router, func() { billingCache.Stop() }
+}
+
+func TestCapacityBudgetThroughRealHTTPHandlers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name  string
+		route string
+		body  string
+	}{
+		{"responses_json", "/openai/v1/responses", `{"model":"gpt-5.2","stream":false,"input":"local test"}`},
+		{"responses_sse", "/openai/v1/responses", `{"model":"gpt-5.2","stream":true,"input":"local test"}`},
+		{"chat_json", "/openai/v1/chat/completions", `{"model":"gpt-5.2","stream":false,"messages":[{"role":"user","content":"local test"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, router, cleanup := newCodexMachineFailoverHandler(t)
+			defer cleanup()
+			upstream.failByID = map[int64]int{811: 503, 812: 503}
+			upstream.failBody = `{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded."}}`
+			req := httptest.NewRequest(http.MethodPost, tc.route, bytes.NewBufferString(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			hits, _, _ := upstream.snapshot()
+			require.Len(t, hits, 3, "capacity request must stop after three upstream failures")
+			require.Equal(t, []int64{811, 811, 812}, hits)
+			require.Contains(t, recorder.Body.String(), `"code":"server_is_overloaded"`)
+			if recorder.Code == http.StatusOK {
+				require.Equal(t, 1, strings.Count(recorder.Body.String(), "event: response.failed"))
+			} else {
+				require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+			}
+		})
+	}
 }
 
 func TestResponsesFailover_CodexMachineToOff_NoResidualIDs(t *testing.T) {
@@ -212,22 +257,26 @@ func TestResponsesFailover_CodexMachineToOff_NoResidualIDs(t *testing.T) {
 		}
 	}
 
-	// attempt 2（off）：HEAD 既有白名单键真实值原样、会话身份头维持 HEAD 行为（不放行），且不得残留 attempt 1 的假名
+	// Off disables convergence, not credential isolation. Both sinks must use
+	// the second account's namespace without retaining the first account's IDs.
 	h2, b2 := headers[1], string(bodies[1])
 	require.Empty(t, h2.Get("session-id"), "off 账号不放行连字符会话头（HEAD 行为）")
 	require.Empty(t, h2.Get("thread-id"))
 	require.Empty(t, h2.Get("x-client-request-id"))
-	require.Equal(t, root+":0", h2.Get("x-codex-window-id"))
-	require.Equal(t, "real-install", h2.Get("x-codex-installation-id"))
-	require.Equal(t, root, gjson.Get(h2.Get("x-codex-turn-metadata"), "thread_id").String())
-	require.Equal(t, root, gjson.Get(b2, "client_metadata.session_id").String())
-	require.Equal(t, root, gjson.Get(b2, "client_metadata.thread_id").String())
-	require.Equal(t, "real-install", gjson.Get(b2, "client_metadata.x-codex-installation-id").String())
-	require.Equal(t, root, gjson.Get(b2, "prompt_cache_key").String())
+	require.NotEmpty(t, h2.Get("x-codex-window-id"))
+	require.NotEmpty(t, h2.Get("x-codex-installation-id"))
+	require.Equal(t, gjson.Get(b2, "client_metadata.x-codex-window-id").String(), h2.Get("x-codex-window-id"))
+	require.Equal(t, gjson.Get(b2, "client_metadata.x-codex-installation-id").String(), h2.Get("x-codex-installation-id"))
+	require.Equal(t, gjson.Get(b2, "client_metadata.thread_id").String(), gjson.Get(h2.Get("x-codex-turn-metadata"), "thread_id").String())
+	require.Equal(t, gjson.Get(b2, "client_metadata.session_id").String(), gjson.Get(b2, "prompt_cache_key").String())
+	require.NotContains(t, b2, root)
+	require.NotContains(t, b2, "real-install")
 	require.NotContains(t, b2, p)
 	for name, values := range h2 {
 		for _, v := range values {
 			require.NotContains(t, v, p, "attempt2 头 %s 残留上一账号假名", name)
+			require.NotContains(t, v, root)
+			require.NotContains(t, v, "real-install")
 		}
 	}
 }
