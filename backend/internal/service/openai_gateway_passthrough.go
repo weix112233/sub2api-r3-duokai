@@ -1296,16 +1296,25 @@ func openAIStreamFailedEventErrorCode(payload []byte) string {
 // 上游在容量紧张时会把请求丢进降载路径：HTTP 200 之后立刻推 event: error
 // （code=server_is_overloaded / slow_down）并以 response.failed 收尾。
 func isOpenAIUpstreamCapacityShedEvent(payload []byte) bool {
-	switch openAIStreamFailedEventErrorCode(payload) {
+	code := openAIStreamFailedEventErrorCode(payload)
+	if code == "" && !gjson.GetBytes(payload, "response.error").IsObject() &&
+		!gjson.GetBytes(payload, "error").IsObject() {
+		code = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "code").String()))
+	}
+	switch code {
 	case "server_is_overloaded", "slow_down":
 		return true
+	case "":
+		// A missing code may be inferred from the authoritative error message.
+	default:
+		return false
 	}
-	for _, path := range []string{"response.error.message", "error.message", "message"} {
-		if isOpenAICapacityShedMessage(gjson.GetBytes(payload, path).String()) {
-			return true
+	for _, path := range []string{"response.error", "error"} {
+		if errorObject := gjson.GetBytes(payload, path); errorObject.IsObject() {
+			return isOpenAICapacityShedMessage(errorObject.Get("message").String())
 		}
 	}
-	return false
+	return isOpenAICapacityShedMessage(gjson.GetBytes(payload, "message").String())
 }
 
 func logOpenAICapacityFailoverSuppressed(

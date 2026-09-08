@@ -375,7 +375,11 @@ func buildOpenAIWSHTTPBridgeFailedEvent(responseID, model string, source []byte,
 		code = strings.TrimSpace(gjson.GetBytes(source, "response.error.code").String())
 	}
 	if code == "" {
-		code = "upstream_error"
+		if isOpenAIUpstreamCapacityShedEvent(source) {
+			code = "server_is_overloaded"
+		} else {
+			code = "upstream_error"
+		}
 	}
 	message := extractOpenAISSEErrorMessage(source)
 	if message == "" {

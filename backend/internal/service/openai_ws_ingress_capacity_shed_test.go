@@ -52,6 +52,18 @@ func TestProxyResponsesWebSocketFromClient_PreservesCapacityShedCodeForClient(t 
 			wantAbsent: []string{`"code":"server_error"`},
 		},
 		{
+			name: "selected_model_capacity_without_code_is_normalized",
+			upstreamEvents: [][]byte{
+				[]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"Selected model is at capacity. Please try a different model."}}`),
+				[]byte(`{"type":"response.failed","response":{"id":"resp_capacity","status":"failed","error":{"message":"Selected model is at capacity. Please try a different model."}}}`),
+			},
+			wantContains: []string{
+				`"code":"server_is_overloaded"`,
+				"Selected model is at capacity",
+			},
+			wantAbsent: []string{`"code":"server_error"`},
+		},
+		{
 			name: "non_capacity_error_code_is_passed_through",
 			upstreamEvents: [][]byte{
 				[]byte(`{"type":"error","error":{"type":"invalid_request_error","code":"workspace_suspended","message":"workspace is suspended"}}`),

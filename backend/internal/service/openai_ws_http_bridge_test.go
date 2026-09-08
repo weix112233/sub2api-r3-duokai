@@ -977,6 +977,17 @@ func TestProxyOpenAIWSHTTPBridgeTurnPreservesCapacityShedCodeForClient(t *testin
 			turn: 2,
 			body: "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_shed\",\"status\":\"failed\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}}}\n\n",
 		},
+		{
+			name:    "turn2_selected_model_capacity_error",
+			turn:    2,
+			body:    "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Selected model is at capacity. Please try a different model.\"}}\n\n",
+			wantErr: true,
+		},
+		{
+			name: "turn2_selected_model_capacity_failed",
+			turn: 2,
+			body: "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_capacity\",\"status\":\"failed\",\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1010,7 +1021,11 @@ func TestProxyOpenAIWSHTTPBridgeTurnPreservesCapacityShedCodeForClient(t *testin
 			require.Len(t, writes, 1)
 			require.Contains(t, string(writes[0]), `"code":"server_is_overloaded"`)
 			require.NotContains(t, string(writes[0]), `"code":"server_error"`)
-			require.Contains(t, string(writes[0]), "Our servers are currently overloaded")
+			if strings.Contains(tt.body, "Selected model is at capacity") {
+				require.Contains(t, string(writes[0]), "Selected model is at capacity")
+			} else {
+				require.Contains(t, string(writes[0]), "Our servers are currently overloaded")
+			}
 		})
 	}
 }
