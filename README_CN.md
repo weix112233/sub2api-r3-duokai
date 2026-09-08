@@ -1,3 +1,8 @@
+> 最新源码：**R10**，包含 `6288461` 的模型容量分类修复。
+> 当前版本与下载说明见 [RELEASE-R10.md](RELEASE-R10.md)。
+> R7 标签与部署包仅保留为历史回滚材料，不再代表最新版。
+> 源码发布不等于已有运行服务已经升级。
+
 <div align="center">
 
 <img src="assets/logo.svg" alt="Sub2API Logo" width="128" />

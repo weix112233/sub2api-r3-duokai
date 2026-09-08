@@ -1,6 +1,10 @@
 # Sub2API Production R7
 
-This branch records the local production-derived R7 source snapshot used to
+> Historical release only. The latest source is R10; see
+> [RELEASE-R10.md](RELEASE-R10.md). Do not use this record as a description of
+> the current default branch or relabel an R7 executable as R10.
+
+This record describes the local production-derived R7 source snapshot used to
 build the deployment package delivered on September 6, 2026.
 
 ## Identity

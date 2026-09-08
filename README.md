@@ -1,6 +1,7 @@
-> Current production snapshot: **R7 / 0.2.0-local-gpt6-stability-r7**.
-> See [RELEASE-R7.md](RELEASE-R7.md) for exact source provenance, reproducible
-> build flags and deployment-package validation.
+> Latest source: **R10**, including the selected-model capacity fix from `6288461`.
+> See [RELEASE-R10.md](RELEASE-R10.md) for the current source and download status.
+> R7 tags and packages are historical rollback material, not the latest version.
+> Source publication does not mean that an existing installation has been upgraded.
 
 <div align="center">
 
