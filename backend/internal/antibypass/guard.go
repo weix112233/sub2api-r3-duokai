@@ -129,10 +129,12 @@ type Request struct {
 	ClientIP          string
 	ClientFingerprint string
 	IdempotencyKey    string
-	ClientRequestID   string
-	Method            string
-	Path              string
-	Body              []byte
+	// ClientRequestID is a protocol operation ID, such as a WS event_id.
+	// HTTP tracing headers must not populate this field.
+	ClientRequestID string
+	Method          string
+	Path            string
+	Body            []byte
 }
 
 type Decision struct {

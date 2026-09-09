@@ -357,9 +357,10 @@ func (b *openAISelectionProbeBudget) wasAttempted(accountID int64) bool {
 }
 
 type openAIStickyEscapeConfig struct {
-	enabled   bool
-	ttftMs    float64
-	errorRate float64
+	enabled               bool
+	ttftMs                float64
+	errorRate             float64
+	preserveCacheAffinity bool
 }
 
 func newDefaultOpenAIAccountScheduler(service *OpenAIGatewayService, stats *openAIAccountRuntimeStats) OpenAIAccountScheduler {
@@ -555,6 +556,9 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
+	// Account-wide TTFT mixes models, reasoning and cold/long prompts. It is
+	// not evidence that moving an OAuth session will improve its next request.
+	escapeCfg.preserveCacheAffinity = account.IsOpenAIOAuthLike()
 	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
@@ -566,6 +570,16 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	}
 	result, acquireErr := s.service.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 	if acquireErr == nil && result != nil && result.Acquired {
+		if escapeCfg.enabled && escapeCfg.preserveCacheAffinity {
+			errorRate, ttft, hasTTFT := s.stats.snapshot(accountID)
+			if hasTTFT && ttft > escapeCfg.ttftMs {
+				slog.Info("sticky_latency_affinity_retained",
+					"account_type", account.Type,
+					"ttft_ewma_ms", ttft,
+					"error_rate", errorRate,
+				)
+			}
+		}
 		if !req.PreserveStickyBinding {
 			_ = s.service.refreshStickySessionTTL(ctx, req.GroupID, sessionHash, s.service.openAIWSSessionStickyTTL())
 		}
@@ -634,11 +648,11 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int6
 		return "", 0, 0, false
 	}
 	errorRate, ttft, hasTTFT := s.stats.snapshot(accountID)
-	if hasTTFT && ttft > cfg.ttftMs {
-		return "ttft", errorRate, ttft, true
-	}
 	if errorRate > cfg.errorRate {
 		return "error_rate", errorRate, ttft, true
+	}
+	if !cfg.preserveCacheAffinity && hasTTFT && ttft > cfg.ttftMs {
+		return "ttft", errorRate, ttft, true
 	}
 	return "", errorRate, ttft, false
 }

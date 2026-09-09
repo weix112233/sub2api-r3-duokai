@@ -4,6 +4,31 @@ This change repairs the application gateway anti-bypass feature. It does not
 change Codex execution hooks, storage admission, account routes or production
 configuration. Source delivery is not runtime deployment.
 
+## Unreleased HTTP Trace-ID Compatibility Follow-Up
+
+HTTP `X-Client-Request-ID` can identify a conversation rather than a single
+immutable operation. The HTTP middleware now leaves that header intact for
+tracing/downstream use without assigning it to the guard's operation-ID
+signature and attempt budget. A normal next turn or tool result must not be
+rejected merely because its trace ID is unchanged.
+
+Explicit `Idempotency-Key` signature conflicts remain rejected. Authenticated
+RPM, concurrency, identity cardinality and cross-key replay checks are
+unchanged. Responses WebSocket `event_id` remains a per-operation identifier
+with its existing conflicting-body and attempt-limit checks.
+
+Old HTTP request-ID Redis entries are not deleted or rewritten by this
+repair. They expire normally, and other budget/lease state is retained.
+Mixed old/new server generations can still expose the old rejection on the
+old binary; do not clear Redis or disable protection to represent completion.
+Rejection logs now include the non-secret current/limit counters.
+
+Regression source covers evolving HTTP turns and tool results, path changes,
+same-body retries, explicit idempotency conflicts, retained legacy Redis
+state, RPM/concurrency/cross-key protections and WebSocket operation IDs.
+Execution, platform builds and release/runtime acceptance for this follow-up
+are still pending; historical results below do not validate the new revision.
+
 ## Repaired Boundaries
 
 | Finding | Source behavior after repair |
@@ -31,7 +56,8 @@ configuration. Source delivery is not runtime deployment.
   instruction fields. This is a deliberate inspection scope, not proof that
   arbitrary prompt injection is impossible.
 - The gateway still applies its normal per-user RPM, concurrency, distinct
-  key/IP/client, request ID and cross-key replay policies when enabled.
+  key/IP/client, explicit idempotency, WS operation ID and cross-key replay
+  policies when enabled. HTTP tracing headers are not operation identities.
 - Fingerprint cardinality uses a versioned `fingerprints:v2` dimension so
   old multipart-boundary noise cannot exhaust the new stable-client budget.
   Existing RPM, key, IP and inference lease dimensions are not reset.

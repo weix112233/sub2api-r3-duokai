@@ -182,13 +182,12 @@ func NewAntiBypassMiddleware(
 		}
 
 		guardConfig := antibypass.DefaultConfig()
+		// HTTP trace IDs may span conversation turns with different bodies.
+		// Keep the header intact, but never use it as a per-operation budget.
 		decision, err := guard.Check(c.Request.Context(), guardConfig, antibypass.Request{
 			UserID:         apiKey.User.ID,
 			APIKeyID:       apiKey.ID,
 			IdempotencyKey: strings.TrimSpace(c.Request.Header.Get("Idempotency-Key")),
-			ClientRequestID: strings.TrimSpace(
-				c.Request.Header.Get("X-Client-Request-ID"),
-			),
 			// Anti-bypass attribution must not inherit the legacy raw-forwarded
 			// header trust switch. Only Gin's trusted-proxy chain is authoritative.
 			ClientIP:          ip.GetTrustedClientIP(c),
@@ -429,6 +428,8 @@ func recordAntiBypassEvent(c *gin.Context, decision antibypass.Decision) {
 	}
 	slog.Warn("anti_bypass_request_blocked",
 		"reason", decision.Reason,
+		"current", decision.Current,
+		"limit", decision.Limit,
 		"user_id", userID,
 		"api_key_id", apiKeyID,
 		"path", path,

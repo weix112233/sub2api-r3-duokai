@@ -1,9 +1,13 @@
 # Sub2API R10
 
-## Current Source
+This is the historical R10 delivery record. The current source candidate is
+documented in [RELEASE-R11.md](RELEASE-R11.md); R11 validation and delivery
+remain separate from the R10 results below.
 
-R10 is the latest source line. The default `main` branch and
-`delivery/r10-source-20260907` are aligned to the same release revision.
+## Delivered Source
+
+The completed R10 Git delivery aligned `main` and
+`delivery/r10-source-20260907` to revision `10e35ba`.
 The application changes include:
 
 - R10 response-owner persistence and atomic Redis ownership updates.
@@ -38,10 +42,10 @@ cross-platform runtime or production-readiness evidence.
 
 ## Download Status
 
-The R10 release is the current **source** download. Its locally exported
+The R10 release was delivered as a **source** download. Its locally exported
 source ZIP and SHA-256 sidecar are bound to the exact release tag.
 
-An R10 deployment binary has not yet been published in this source release.
+No R10 deployment binary was included in this source release.
 Do not download an old R7 deployment ZIP and treat it as R10. Verified R10
 binaries must be built locally and delivered with their own provenance,
 checksums and platform-validation limits before being added as assets.

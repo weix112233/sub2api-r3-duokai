@@ -57,6 +57,7 @@ func (s *antiBypassFrameSession) Inspect(ctx context.Context, payload []byte, en
 	}
 	request := s.request
 	request.Body = payload
+	// event_id identifies a frame operation, not the parent HTTP trace.
 	request.ClientRequestID = frame.EventID
 	request.IdempotencyKey = ""
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)

@@ -1,11 +1,7 @@
-# 简化版 GoReleaser 配置 - 仅发布 x86_64 GHCR 镜像
+# 简化镜像构建；二进制仍须覆盖 macOS、Windows 和 Linux。
 version: 2
 
 project_name: sub2api
-
-before:
-  hooks:
-    - go mod tidy -C backend
 
 builds:
   - id: sub2api
@@ -14,24 +10,44 @@ builds:
     binary: sub2api
     flags:
       - -tags=embed
+      - -mod=readonly
     env:
       - CGO_ENABLED=0
     goos:
       - linux
+      - windows
+      - darwin
     goarch:
       - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
     ldflags:
       - -s -w
+      - -X main.Version={{.Version}}
       - -X main.Commit={{.Commit}}
       - -X main.Date={{.Date}}
       - -X main.BuildType=release
 
-# 跳过 archives
-archives: []
+archives:
+  - id: default
+    format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE*
+      - README*
+      - RELEASE-POLICY.md
+      - RELEASE-R11.md
+      - deploy/*
 
-# 跳过 checksum
 checksum:
-  disable: true
+  name_template: 'checksums.txt'
+  algorithm: sha256
 
 changelog:
   disable: true
@@ -63,14 +79,13 @@ release:
   github:
     owner: "{{ .Env.GITHUB_REPO_OWNER }}"
     name: "{{ .Env.GITHUB_REPO_NAME }}"
-  draft: false
+  draft: true
   prerelease: auto
   name_template: "Sub2API {{.Version}} (Simple)"
-  # 跳过上传二进制包
-  skip_upload: true
+  skip_upload: false
   header: |
     > AI API Gateway Platform - 将 AI 订阅配额分发和管理
-    > ⚡ Simple Release: 仅包含 x86_64 GHCR 镜像
+    > 简化版：仅简化 GHCR 镜像，仍包含三大系统的二进制部署包。
 
     {{ .Env.TAG_MESSAGE }}
 
@@ -83,6 +98,10 @@ release:
     ```bash
     docker pull ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/sub2api:{{ .Version }}
     ```
+
+    **Binary archives:**
+    macOS (amd64/arm64), Windows (amd64), Linux (amd64/arm64).
+    Select the matching archive and verify it with `checksums.txt`.
 
     ## 📚 Documentation
 

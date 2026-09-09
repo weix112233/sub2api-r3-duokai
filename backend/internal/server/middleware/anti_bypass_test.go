@@ -388,7 +388,7 @@ func TestAntiBypassInspectsCallerInstructionRoles(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "ANTI_BYPASS_PROMPT_BLOCKED")
 }
 
-func TestAntiBypassKeepsIdempotencyAndClientRequestSemanticsSeparate(t *testing.T) {
+func TestAntiBypassHTTPTraceAndIdempotencyRetriesRemainIndependent(t *testing.T) {
 	var called bool
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
@@ -408,15 +408,10 @@ func TestAntiBypassKeepsIdempotencyAndClientRequestSemanticsSeparate(t *testing.
 	for attempt := 0; attempt < 4; attempt++ {
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-Client-Request-ID", "bounded-client-request")
+		request.Header.Set("X-Client-Request-ID", "conversation-trace")
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, request)
-		if attempt < 3 {
-			require.Equal(t, http.StatusOK, recorder.Code, "client request attempt %d", attempt+1)
-		} else {
-			require.Equal(t, http.StatusTooManyRequests, recorder.Code)
-			require.Contains(t, recorder.Body.String(), "ANTI_BYPASS_BLOCKED")
-		}
+		require.Equal(t, http.StatusOK, recorder.Code, "traced request %d", attempt+1)
 	}
 	require.True(t, called)
 }
