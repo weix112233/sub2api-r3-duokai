@@ -1,10 +1,16 @@
-# Sub2API R11 Source Candidate
+# Sub2API R11 Source Update
 
-Status: source candidate, not a tested binary release. The last completed
-Git delivery is R10 at `10e35ba48ecc38b02cd61ec6dfdd570ac3d145a3`.
-This candidate must pass current-generation validation before replacing the
-default release or an installed service. Historical R10 test counts do not
-validate R11.
+Status: current repository source, not a tested binary release.
+The complete application/source candidate was committed as
+`c5ae2f2fcca7bb634f125c4420523ec8c60eab60`, based on R10
+`10e35ba48ecc38b02cd61ec6dfdd570ac3d145a3`. The current `main` and
+`delivery/r11-source-20260909` branches contain that commit plus the
+source-delivery documentation update. Use the full current commit as the
+source identity; a branch name alone is not immutable.
+
+The user requested source synchronization before local runtime deployment.
+This update does not publish verified binary packages, restart a service or
+turn historical R10 test counts into R11 validation.
 
 ## Included Changes
 
@@ -60,9 +66,11 @@ Do not announce an incomplete set as the latest complete release.
 
 ## Replacement And Rollback
 
-On verified release, move the current source/download pointers together.
-Old artifacts leave current download selection but keep their original tags,
-digests and history for rollback. Do not force-rewrite history, delete unique
+Current source branches and repository descriptions identify R11. The old
+R10 source release is retained as a historical draft, not the latest download;
+use GitHub's current `main` source until validated platform assets are ready.
+Old artifacts keep their original tags, digests and history for rollback.
+Do not force-rewrite history, delete unique
 recovery data, mix binaries from different revisions or rename R10 packages
 as R11. Existing installations change only through their authorized runtime
 publication and consumer acceptance process.

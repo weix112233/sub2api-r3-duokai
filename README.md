@@ -1,6 +1,6 @@
-> Current source candidate: **R11**, including HTTP trace-ID compatibility and OAuth session-affinity changes on top of R10.
+> Latest source: **R11**, including HTTP trace-ID compatibility and OAuth session-affinity changes on top of R10.
 > See [RELEASE-R11.md](RELEASE-R11.md) for validation and delivery status. R11 is not yet a verified binary release.
-> The last completed Git delivery is R10 at `10e35ba`; prior artifacts retain their exact historical versions.
+> R10 at `10e35ba` is historical source. Use the current `main` branch for R11; old R10 archives do not include these changes.
 > A source commit does not mean that an existing installation has been upgraded.
 > Future releases must include macOS, Windows and Linux deployment archives; see [RELEASE-POLICY.md](RELEASE-POLICY.md).
 

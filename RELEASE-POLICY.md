@@ -4,6 +4,18 @@ Future formal release updates for this maintained repository must deliver
 actual binaries for all three operating systems. A source archive, Docker
 image or single-platform package is not a complete release.
 
+## Source Synchronization
+
+The user may request a complete source update separately from binary release
+and local deployment. In that case, synchronize the complete source, tests,
+version and release configuration to the current source branches, explicitly
+state pending validation, and do not claim built artifacts or runtime adoption.
+This does not relax any build, resource or deployment gate.
+
+Old source-only release entries must no longer claim to be the latest source.
+Retain their immutable history/assets as historical drafts; do not fabricate
+a new complete release before the required binary matrix is ready.
+
 ## Required Artifacts
 
 Both GoReleaser configurations retain the same required binary matrix:
