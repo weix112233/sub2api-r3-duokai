@@ -191,20 +191,24 @@ func appendResponsesInput(texts *promptTexts, input any) bool {
 	case string:
 		return appendPromptText(texts, input)
 	case []any:
+		var latestUser any
 		for _, item := range input {
 			switch item := item.(type) {
 			case string:
-				if !appendPromptText(texts, item) {
-					return false
-				}
+				latestUser = item
 			case map[string]any:
-				if isInstructionRole(stringValue(item["role"]), false) {
+				role := strings.ToLower(strings.TrimSpace(stringValue(item["role"])))
+				switch role {
+				case "system", "developer":
 					if !appendPromptText(texts, item["content"]) {
 						return false
 					}
+				case "user", "human":
+					latestUser = item["content"]
 				}
 			}
 		}
+		return appendPromptText(texts, latestUser)
 	case map[string]any:
 		if isInstructionRole(stringValue(input["role"]), false) {
 			return appendPromptText(texts, input["content"])
@@ -218,22 +222,26 @@ func appendRoleMessages(texts *promptTexts, messages any, allowMissingUserRole b
 	if !ok {
 		return true
 	}
+	var latestUser any
 	for _, item := range items {
 		message, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		role := strings.ToLower(strings.TrimSpace(stringValue(message["role"])))
-		if !isInstructionRole(role, allowMissingUserRole) {
-			continue
-		}
-		// Content blocks of one message stay together; different messages cannot
-		// grant each other an analysis exception or fabricate combined signals.
-		if !appendPromptText(texts, []any{message["content"], message["parts"]}) {
-			return false
+		switch {
+		case role == "system" || role == "developer":
+			if !appendPromptText(texts, []any{message["content"], message["parts"]}) {
+				return false
+			}
+		case role == "user" || role == "human" || (allowMissingUserRole && role == ""):
+			// A request may resend the whole conversation. Inspect only the
+			// newest user turn so an old blocked test does not poison later
+			// ordinary turns while privileged instructions remain covered.
+			latestUser = []any{message["content"], message["parts"]}
 		}
 	}
-	return true
+	return appendPromptText(texts, latestUser)
 }
 
 func isInstructionRole(role string, allowMissing bool) bool {
