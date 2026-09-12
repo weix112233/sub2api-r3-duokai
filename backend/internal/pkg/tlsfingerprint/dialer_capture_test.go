@@ -3,16 +3,19 @@
 package tlsfingerprint
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
+	"gopkg.in/yaml.v3"
 )
 
 // CapturedFingerprint 对应 tls-fingerprint-web 返回的 Fingerprint 结构。
@@ -48,50 +51,43 @@ func TestDialerAgainstCaptureServer(t *testing.T) {
 		t.Skip("跳过外部 TLS 指纹 capture 测试：未设置 TLSFINGERPRINT_CAPTURE_URL")
 	}
 
+	fixturePath := strings.TrimSpace(os.Getenv("TLSFINGERPRINT_PROFILE_YAML"))
+	if fixturePath == "" {
+		t.Fatal("TLSFINGERPRINT_PROFILE_YAML is required with TLSFINGERPRINT_CAPTURE_URL")
+	}
+	fixtureFile, err := os.Open(fixturePath)
+	if err != nil {
+		t.Fatal("open external YAML fixture:", err)
+	}
+	defer fixtureFile.Close()
+	data, err := io.ReadAll(io.LimitReader(fixtureFile, MaxProfileYAMLBytes+1))
+	if err != nil || len(data) > MaxProfileYAMLBytes {
+		t.Fatal("cannot read bounded external YAML fixture")
+	}
+	var fixture struct {
+		Profile     ProfileDocument `yaml:"profile"`
+		ExpectedJA3 string          `yaml:"expected_ja3"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&fixture); err != nil {
+		t.Fatal("decode fixture:", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF || strings.TrimSpace(fixture.Profile.Name) == "" {
+		t.Fatal("fixture requires one document and a named profile")
+	}
+	if err := fixture.Profile.Validate(); err != nil {
+		t.Fatal("invalid fixture profile:", err)
+	}
+	if _, err := parseJA3(fixture.ExpectedJA3); err != nil {
+		t.Fatal("expected_ja3:", err)
+	}
 	tests := []struct {
 		name    string
 		profile *Profile
 	}{
-		{
-			name: "default_profile",
-			profile: &Profile{
-				Name:         "default",
-				EnableGREASE: false,
-				// 全部留空时使用内置默认值
-			},
-		},
-		{
-			name: "linux_x64_node_v22171",
-			profile: &Profile{
-				Name:                "linux_x64_node_v22171",
-				EnableGREASE:        false,
-				CipherSuites:        []uint16{4866, 4867, 4865, 49199, 49195, 49200, 49196, 158, 49191, 103, 49192, 107, 163, 159, 52393, 52392, 52394, 49327, 49325, 49315, 49311, 49245, 49249, 49239, 49235, 162, 49326, 49324, 49314, 49310, 49244, 49248, 49238, 49234, 49188, 106, 49187, 64, 49162, 49172, 57, 56, 49161, 49171, 51, 50, 157, 49313, 49309, 49233, 156, 49312, 49308, 49232, 61, 60, 53, 47, 255},
-				Curves:              []uint16{29, 23, 30, 25, 24, 256, 257, 258, 259, 260},
-				PointFormats:        []uint16{0, 1, 2},
-				SignatureAlgorithms: []uint16{0x0403, 0x0503, 0x0603, 0x0807, 0x0808, 0x0809, 0x080a, 0x080b, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601, 0x0303, 0x0301, 0x0302, 0x0402, 0x0502, 0x0602},
-				ALPNProtocols:       []string{"http/1.1"},
-				SupportedVersions:   []uint16{0x0304, 0x0303},
-				KeyShareGroups:      []uint16{29},
-				PSKModes:            []uint16{1},
-				Extensions:          []uint16{0, 11, 10, 35, 16, 22, 23, 13, 43, 45, 51},
-			},
-		},
-		{
-			name: "macos_arm64_node_v2430",
-			profile: &Profile{
-				Name:                "MacOS_arm64_node_v2430",
-				EnableGREASE:        false,
-				CipherSuites:        []uint16{4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49161, 49171, 49162, 49172, 156, 157, 47, 53},
-				Curves:              []uint16{29, 23, 24},
-				PointFormats:        []uint16{0},
-				SignatureAlgorithms: []uint16{0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0201},
-				ALPNProtocols:       []string{"http/1.1"},
-				SupportedVersions:   []uint16{0x0304, 0x0303},
-				KeyShareGroups:      []uint16{29},
-				PSKModes:            []uint16{1},
-				Extensions:          []uint16{0, 65037, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43},
-			},
-		},
+		{fixture.Profile.Name, &fixture.Profile.Profile},
 	}
 
 	for _, tc := range tests {
@@ -101,88 +97,15 @@ func TestDialerAgainstCaptureServer(t *testing.T) {
 				return
 			}
 
-			t.Logf("JA3 Hash: %s", captured.JA3Hash)
-			t.Logf("JA4:      %s", captured.JA4)
+			assertJA3Fields(t, fixture.ExpectedJA3, captured.JA3Raw, tc.profile.ShuffleExtensions)
 
-			// 解析实际生效的 Profile 值，也就是 Dialer 最终使用的值。
-			effectiveCipherSuites := tc.profile.CipherSuites
-			if len(effectiveCipherSuites) == 0 {
-				effectiveCipherSuites = defaultCipherSuites
-			}
-			effectiveCurves := tc.profile.Curves
-			if len(effectiveCurves) == 0 {
-				effectiveCurves = make([]uint16, len(defaultCurves))
-				for i, c := range defaultCurves {
-					effectiveCurves[i] = uint16(c)
+			var expectedALPN []string
+			for _, ext := range buildClientHelloSpecFromProfile(tc.profile).Extensions {
+				if alpn, ok := ext.(*utls.ALPNExtension); ok {
+					expectedALPN = alpn.AlpnProtocols
 				}
 			}
-			effectivePointFormats := tc.profile.PointFormats
-			if len(effectivePointFormats) == 0 {
-				effectivePointFormats = defaultPointFormats
-			}
-			effectiveSigAlgs := tc.profile.SignatureAlgorithms
-			if len(effectiveSigAlgs) == 0 {
-				effectiveSigAlgs = make([]uint16, len(defaultSignatureAlgorithms))
-				for i, s := range defaultSignatureAlgorithms {
-					effectiveSigAlgs[i] = uint16(s)
-				}
-			}
-			effectiveALPN := tc.profile.ALPNProtocols
-			if len(effectiveALPN) == 0 {
-				effectiveALPN = []string{"http/1.1"}
-			}
-			effectiveVersions := tc.profile.SupportedVersions
-			if len(effectiveVersions) == 0 {
-				effectiveVersions = []uint16{0x0304, 0x0303}
-			}
-			effectiveKeyShare := tc.profile.KeyShareGroups
-			if len(effectiveKeyShare) == 0 {
-				effectiveKeyShare = []uint16{29} // X25519
-			}
-			effectivePSKModes := tc.profile.PSKModes
-			if len(effectivePSKModes) == 0 {
-				effectivePSKModes = []uint16{1} // psk_dhe_ke
-			}
-
-			// 校验每个指纹字段
-			assertIntSliceEqual(t, "cipher_suites", uint16sToInts(effectiveCipherSuites), captured.CipherSuites)
-			assertIntSliceEqual(t, "curves", uint16sToInts(effectiveCurves), captured.Curves)
-			assertIntSliceEqual(t, "point_formats", uint16sToInts(effectivePointFormats), captured.PointFormats)
-			assertIntSliceEqual(t, "signature_algorithms", uint16sToInts(effectiveSigAlgs), captured.SignatureAlgorithms)
-			assertStringSliceEqual(t, "alpn_protocols", effectiveALPN, captured.ALPNProtocols)
-			assertIntSliceEqual(t, "supported_versions", uint16sToInts(effectiveVersions), captured.SupportedVersions)
-			assertIntSliceEqual(t, "key_share_groups", uint16sToInts(effectiveKeyShare), captured.KeyShareGroups)
-			assertIntSliceEqual(t, "psk_modes", uint16sToInts(effectivePSKModes), captured.PSKModes)
-
-			if captured.EnableGREASE != tc.profile.EnableGREASE {
-				t.Errorf("enable_grease: got %v, want %v", captured.EnableGREASE, tc.profile.EnableGREASE)
-			} else {
-				t.Logf("  enable_grease: %v OK", captured.EnableGREASE)
-			}
-
-			// 校验扩展顺序；如果 Profile 显式配置了 Extensions 就使用配置值，
-			// 否则使用默认顺序（Node.js 24.x）。
-			expectedExtOrder := uint16sToInts(defaultExtensionOrder)
-			if len(tc.profile.Extensions) > 0 {
-				expectedExtOrder = uint16sToInts(tc.profile.Extensions)
-			}
-			// 比较前从期望值和采集值中剔除 GREASE。
-			var filteredExpected, filteredActual []int
-			for _, e := range expectedExtOrder {
-				if !isGREASEValue(uint16(e)) {
-					filteredExpected = append(filteredExpected, e)
-				}
-			}
-			for _, e := range captured.Extensions {
-				if !isGREASEValue(uint16(e)) {
-					filteredActual = append(filteredActual, e)
-				}
-			}
-			assertIntSliceEqual(t, "extensions (order, non-GREASE)", filteredExpected, filteredActual)
-
-			// 打印完整采集结果，便于排查指纹差异。
-			capturedJSON, _ := json.MarshalIndent(captured, "  ", "  ")
-			t.Logf("Full captured fingerprint:\n  %s", string(capturedJSON))
+			assertStringSliceEqual(t, "alpn_protocols", expectedALPN, captured.ALPNProtocols)
 		})
 	}
 }
@@ -190,33 +113,38 @@ func TestDialerAgainstCaptureServer(t *testing.T) {
 func fetchCapturedFingerprint(t *testing.T, captureURL string, profile *Profile) *CapturedFingerprint {
 	t.Helper()
 
-	dialer := NewDialer(profile, nil)
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialTLSContext: dialer.DialTLSContext,
-		},
-		Timeout: 10 * time.Second,
+	target, err := url.Parse(captureURL)
+	if err != nil || target.Scheme != "https" || target.Hostname() == "" || target.User != nil {
+		t.Fatal("capture URL must be HTTPS without userinfo")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", captureURL, strings.NewReader(`{"model":"test"}`))
+	req, err := http.NewRequestWithContext(ctx, "GET", captureURL, nil)
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 		return nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-token")
-
-	resp, err := client.Do(req)
+	transport, err := NewTransport(&http.Transport{
+		DialTLSContext:  NewDialer(profile, nil).DialTLSContext,
+		IdleConnTimeout: time.Second,
+	}, profile)
+	if err != nil {
+		t.Fatal("capture transport:", err)
+	}
+	defer transport.CloseIdleConnections()
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("capture returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 		return nil
@@ -224,46 +152,11 @@ func fetchCapturedFingerprint(t *testing.T, captureURL string, profile *Profile)
 
 	var fp CapturedFingerprint
 	if err := json.Unmarshal(body, &fp); err != nil {
-		t.Logf("Response body: %s", string(body))
 		t.Fatalf("parse response: %v", err)
 		return nil
 	}
 
 	return &fp
-}
-
-func uint16sToInts(vals []uint16) []int {
-	result := make([]int, len(vals))
-	for i, v := range vals {
-		result[i] = int(v)
-	}
-	return result
-}
-
-func assertIntSliceEqual(t *testing.T, name string, expected, actual []int) {
-	t.Helper()
-	if len(expected) != len(actual) {
-		t.Errorf("%s: length mismatch: got %d, want %d", name, len(actual), len(expected))
-		if len(actual) < 20 && len(expected) < 20 {
-			t.Errorf("  got:  %v", actual)
-			t.Errorf("  want: %v", expected)
-		}
-		return
-	}
-	mismatches := 0
-	for i := range expected {
-		if expected[i] != actual[i] {
-			if mismatches < 5 {
-				t.Errorf("%s[%d]: got %d (0x%04x), want %d (0x%04x)", name, i, actual[i], actual[i], expected[i], expected[i])
-			}
-			mismatches++
-		}
-	}
-	if mismatches == 0 {
-		t.Logf("  %s: %d items OK", name, len(expected))
-	} else if mismatches > 5 {
-		t.Errorf("  %s: %d/%d mismatches (showing first 5)", name, mismatches, len(expected))
-	}
 }
 
 func assertStringSliceEqual(t *testing.T, name string, expected, actual []string) {

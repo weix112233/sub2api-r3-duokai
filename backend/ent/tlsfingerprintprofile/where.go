@@ -79,6 +79,11 @@ func EnableGrease(v bool) predicate.TLSFingerprintProfile {
 	return predicate.TLSFingerprintProfile(sql.FieldEQ(FieldEnableGrease, v))
 }
 
+// ShuffleExtensions applies equality check predicate on the "shuffle_extensions" field. It's identical to ShuffleExtensionsEQ.
+func ShuffleExtensions(v bool) predicate.TLSFingerprintProfile {
+	return predicate.TLSFingerprintProfile(sql.FieldEQ(FieldShuffleExtensions, v))
+}
+
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.
 func CreatedAtEQ(v time.Time) predicate.TLSFingerprintProfile {
 	return predicate.TLSFingerprintProfile(sql.FieldEQ(FieldCreatedAt, v))
@@ -307,6 +312,26 @@ func EnableGreaseEQ(v bool) predicate.TLSFingerprintProfile {
 // EnableGreaseNEQ applies the NEQ predicate on the "enable_grease" field.
 func EnableGreaseNEQ(v bool) predicate.TLSFingerprintProfile {
 	return predicate.TLSFingerprintProfile(sql.FieldNEQ(FieldEnableGrease, v))
+}
+
+// ShuffleExtensionsEQ applies the EQ predicate on the "shuffle_extensions" field.
+func ShuffleExtensionsEQ(v bool) predicate.TLSFingerprintProfile {
+	return predicate.TLSFingerprintProfile(sql.FieldEQ(FieldShuffleExtensions, v))
+}
+
+// ShuffleExtensionsNEQ applies the NEQ predicate on the "shuffle_extensions" field.
+func ShuffleExtensionsNEQ(v bool) predicate.TLSFingerprintProfile {
+	return predicate.TLSFingerprintProfile(sql.FieldNEQ(FieldShuffleExtensions, v))
+}
+
+// Http2IsNil applies the IsNil predicate on the "http2" field.
+func Http2IsNil() predicate.TLSFingerprintProfile {
+	return predicate.TLSFingerprintProfile(sql.FieldIsNull(FieldHttp2))
+}
+
+// Http2NotNil applies the NotNil predicate on the "http2" field.
+func Http2NotNil() predicate.TLSFingerprintProfile {
+	return predicate.TLSFingerprintProfile(sql.FieldNotNull(FieldHttp2))
 }
 
 // CipherSuitesIsNil applies the IsNil predicate on the "cipher_suites" field.

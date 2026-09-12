@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 
 	"github.com/imroc/req/v3"
 )
@@ -19,6 +20,7 @@ type reqClientOptions struct {
 	Timeout     time.Duration // 请求超时时间
 	Impersonate bool          // 是否模拟 Chrome 浏览器指纹
 	ForceHTTP2  bool          // 是否强制使用 HTTP/2
+	TLSProfile  *tlsfingerprint.Profile
 }
 
 // sharedReqClients 存储按配置参数缓存的 req 客户端实例
@@ -52,16 +54,31 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	if opts.Impersonate {
 		client = client.ImpersonateChrome()
 	}
-	trimmed, _, err := proxyurl.Parse(opts.ProxyURL)
+	trimmed, parsedProxy, err := proxyurl.Parse(opts.ProxyURL)
 	if err != nil {
 		return nil, err
 	}
 	if trimmed != "" {
 		client.SetProxyURL(trimmed)
 	}
-	client = instrumentReqClient(client)
+	if opts.TLSProfile != nil {
+		base := &http.Transport{
+			MaxIdleConns: 128, MaxIdleConnsPerHost: 16,
+			IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
+		}
+		rt, err := tlsfingerprint.ConfigureTransport(base, opts.TLSProfile.Clone(), parsedProxy)
+		if err != nil {
+			return nil, err
+		}
+		client.GetClient().Transport = servertiming.WrapRoundTripper(rt)
+	} else {
+		client = instrumentReqClient(client)
+	}
 
-	actual, _ := sharedReqClients.LoadOrStore(key, client)
+	actual, loaded := sharedReqClients.LoadOrStore(key, client)
+	if loaded {
+		client.GetClient().CloseIdleConnections()
+	}
 	if c, ok := actual.(*req.Client); ok {
 		return c, nil
 	}
@@ -80,12 +97,16 @@ func instrumentReqClient(client *req.Client) *req.Client {
 }
 
 func buildReqClientKey(opts reqClientOptions) string {
-	return fmt.Sprintf("%s|%s|%t|%t",
+	key := fmt.Sprintf("%s|%s|%t|%t",
 		strings.TrimSpace(opts.ProxyURL),
 		opts.Timeout.String(),
 		opts.Impersonate,
 		opts.ForceHTTP2,
 	)
+	if opts.TLSProfile != nil {
+		key += "|" + opts.TLSProfile.TransportKey()
+	}
+	return key
 }
 
 // CreatePrivacyReqClient creates an HTTP client for OpenAI privacy settings API

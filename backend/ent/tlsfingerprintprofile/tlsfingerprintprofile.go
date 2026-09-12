@@ -23,6 +23,10 @@ const (
 	FieldDescription = "description"
 	// FieldEnableGrease holds the string denoting the enable_grease field in the database.
 	FieldEnableGrease = "enable_grease"
+	// FieldShuffleExtensions holds the string denoting the shuffle_extensions field in the database.
+	FieldShuffleExtensions = "shuffle_extensions"
+	// FieldHttp2 holds the string denoting the http2 field in the database.
+	FieldHttp2 = "http2"
 	// FieldCipherSuites holds the string denoting the cipher_suites field in the database.
 	FieldCipherSuites = "cipher_suites"
 	// FieldCurves holds the string denoting the curves field in the database.
@@ -53,6 +57,8 @@ var Columns = []string{
 	FieldName,
 	FieldDescription,
 	FieldEnableGrease,
+	FieldShuffleExtensions,
+	FieldHttp2,
 	FieldCipherSuites,
 	FieldCurves,
 	FieldPointFormats,
@@ -85,6 +91,8 @@ var (
 	NameValidator func(string) error
 	// DefaultEnableGrease holds the default value on creation for the "enable_grease" field.
 	DefaultEnableGrease bool
+	// DefaultShuffleExtensions holds the default value on creation for the "shuffle_extensions" field.
+	DefaultShuffleExtensions bool
 )
 
 // OrderOption defines the ordering options for the TLSFingerprintProfile queries.
@@ -118,4 +126,9 @@ func ByDescription(opts ...sql.OrderTermOption) OrderOption {
 // ByEnableGrease orders the results by the enable_grease field.
 func ByEnableGrease(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldEnableGrease, opts...).ToFunc()
+}
+
+// ByShuffleExtensions orders the results by the shuffle_extensions field.
+func ByShuffleExtensions(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldShuffleExtensions, opts...).ToFunc()
 }

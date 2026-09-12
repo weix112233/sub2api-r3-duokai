@@ -80,6 +80,9 @@ func (UsageLog) Fields() []ent.Field {
 			Default(0),
 		field.Int("output_tokens").
 			Default(0),
+		field.Int("reasoning_tokens").
+			Default(0).
+			NonNegative(),
 		field.Int("cache_creation_tokens").
 			Default(0),
 		field.Int("cache_read_tokens").

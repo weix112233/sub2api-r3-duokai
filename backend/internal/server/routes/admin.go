@@ -102,6 +102,14 @@ func RegisterAdminRoutes(
 
 		// TLS 指纹模板管理
 		registerTLSFingerprintProfileRoutes(admin, h)
+		if h.Admin.OpenAIOperations != nil {
+			operations := admin.Group("/openai-operations")
+			operations.GET("/settings", h.Admin.OpenAIOperations.GetSettings)
+			operations.PUT("/settings", h.Admin.OpenAIOperations.SetSettings)
+			operations.GET("/reasoning", h.Admin.OpenAIOperations.Reasoning)
+			operations.GET("/pool", h.Admin.OpenAIOperations.Pool)
+			operations.GET("/recovery-events", h.Admin.OpenAIOperations.Events)
+		}
 
 		// 本地进程插件管理
 		registerPluginRoutes(admin, h, stepUpAuth)
@@ -739,6 +747,9 @@ func registerTLSFingerprintProfileRoutes(admin *gin.RouterGroup, h *handler.Hand
 	profiles := admin.Group("/tls-fingerprint-profiles")
 	{
 		profiles.GET("", h.Admin.TLSFingerprintProfile.List)
+		profiles.POST("/parse-yaml", h.Admin.TLSFingerprintProfile.ParseYAML)
+		profiles.GET("/defaults", h.Admin.TLSFingerprintProfile.GetDefaults)
+		profiles.PUT("/defaults", h.Admin.TLSFingerprintProfile.SetDefaults)
 		profiles.GET("/:id", h.Admin.TLSFingerprintProfile.GetByID)
 		profiles.POST("", h.Admin.TLSFingerprintProfile.Create)
 		profiles.PUT("/:id", h.Admin.TLSFingerprintProfile.Update)

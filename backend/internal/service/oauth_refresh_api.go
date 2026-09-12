@@ -171,6 +171,17 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	executor OAuthRefreshExecutor,
 	refreshWindow time.Duration,
 ) (*OAuthRefreshResult, error) {
+	return api.refreshIfNeeded(ctx, account, executor, refreshWindow, false)
+}
+
+// RecoverOpenAIError shares the normal refresh lock and credential flow. Only
+// the explicitly enabled recovery worker uses this error-account entry point.
+func (api *OAuthRefreshAPI) RecoverOpenAIError(ctx context.Context, account *Account, executor OAuthRefreshExecutor) (*OAuthRefreshResult, error) {
+	return api.refreshIfNeeded(ctx, account, executor, 0, true)
+}
+
+func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Account, executor OAuthRefreshExecutor,
+	refreshWindow time.Duration, recovery bool) (*OAuthRefreshResult, error) {
 	if api == nil || api.accountRepo == nil {
 		return nil, errors.New("oauth refresh account repository is not configured")
 	}
@@ -194,6 +205,9 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	if api.tokenCache != nil {
 		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
 		if lockErr != nil {
+			if recovery {
+				return nil, fmt.Errorf("recovery distributed refresh lock unavailable")
+			}
 			// Redis 错误，降级为无锁刷新（进程内互斥锁仍生效）
 			slog.Warn("oauth_refresh_lock_failed_degraded",
 				"account_id", account.ID,
@@ -225,7 +239,17 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	if freshAccount.ID != account.ID {
 		return nil, fmt.Errorf("%w: account identity mismatch", errOAuthRefreshAccountRereadFailed)
 	}
-	if !freshAccount.IsActive() {
+	if recovery && (freshAccount.GetOpenAIRefreshToken() != account.GetOpenAIRefreshToken() ||
+		freshAccount.GetCredential("client_id") != account.GetCredential("client_id")) {
+		return &OAuthRefreshResult{Account: freshAccount}, nil
+	}
+	if recovery && (freshAccount.Platform != PlatformOpenAI || freshAccount.Type != AccountTypeOAuth ||
+		freshAccount.Status != StatusError || freshAccount.IsCredentialShadow() ||
+		freshAccount.IsOpenAIPersonalAccessToken() || freshAccount.GetOpenAIRefreshToken() == "" ||
+		classifyOpenAIRecovery(freshAccount.ErrorMessage) == "permanent" || freshAccount.IsRateLimited()) {
+		return &OAuthRefreshResult{Account: freshAccount}, nil
+	}
+	if !freshAccount.IsActive() && !recovery {
 		if requestPath {
 			return nil, fmt.Errorf("%w: account is not active", errOAuthRefreshAccountStateChanged)
 		}
@@ -247,7 +271,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	}
 
 	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）
-	if !executor.NeedsRefresh(freshAccount, refreshWindow) {
+	if !recovery && !executor.NeedsRefresh(freshAccount, refreshWindow) {
 		return &OAuthRefreshResult{
 			Account: freshAccount,
 		}, nil
@@ -291,9 +315,34 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	}
 
 	// 5. 设置版本号 + 更新 DB
+	if recovery && newCredentials == nil {
+		return nil, fmt.Errorf("recovery refresh returned no credentials")
+	}
 	if newCredentials != nil {
 		newCredentials["_token_version"] = time.Now().UnixMilli()
-		if freshAccount.IsGrokOAuth() {
+		if recovery {
+			repo, ok := api.accountRepo.(OpenAIRecoveryCredentialRepository)
+			if !ok {
+				return nil, fmt.Errorf("OpenAI recovery CAS repository unavailable")
+			}
+			applied, err := repo.SaveRecoveredOpenAIAccount(ctx, attemptedAccount, newCredentials)
+			if err != nil {
+				return nil, fmt.Errorf("OpenAI recovery credential persistence failed")
+			}
+			if applied && api.tokenCache != nil {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRefreshPostPersistCleanupTimeout)
+				invalidateErr := NewCompositeTokenCacheInvalidator(api.tokenCache).InvalidateToken(cleanupCtx, attemptedAccount)
+				cancel()
+				if invalidateErr != nil {
+					slog.Warn("openai_recovery_token_cache_invalidation_failed", "account_id", attemptedAccount.ID)
+				}
+			}
+			current, err := api.accountRepo.GetByID(ctx, freshAccount.ID)
+			if err != nil {
+				return nil, fmt.Errorf("OpenAI recovery durable state unavailable")
+			}
+			return &OAuthRefreshResult{Refreshed: applied, Account: current}, nil
+		} else if freshAccount.IsGrokOAuth() {
 			conditionalRepo, ok := api.accountRepo.(GrokOAuthRefreshSuccessRepository)
 			if !ok {
 				return nil, &providerConfigurationRefreshError{

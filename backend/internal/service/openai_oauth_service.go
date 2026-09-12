@@ -10,6 +10,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
@@ -17,6 +18,7 @@ type OpenAIOAuthService struct {
 	sessionStore         *openai.SessionStore
 	proxyRepo            ProxyRepository
 	oauthClient          OpenAIOAuthClient
+	tlsProfiles          *TLSFingerprintProfileService
 	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
 }
 
@@ -33,6 +35,20 @@ func NewOpenAIOAuthService(proxyRepo ProxyRepository, oauthClient OpenAIOAuthCli
 // 用于调用 chatgpt.com/backend-api 获取账号信息（plan_type 等）。
 func (s *OpenAIOAuthService) SetPrivacyClientFactory(factory PrivacyClientFactory) {
 	s.privacyClientFactory = factory
+}
+
+func (s *OpenAIOAuthService) profileContext(ctx context.Context, account *Account) context.Context {
+	if account != nil {
+		var profile *tlsfingerprint.Profile
+		if s.tlsProfiles != nil {
+			profile = s.tlsProfiles.ResolveTLSProfile(account)
+		}
+		return tlsfingerprint.WithProfile(ctx, profile)
+	}
+	if _, present := tlsfingerprint.ProfileFromContext(ctx); present {
+		return ctx
+	}
+	return tlsfingerprint.WithProfile(ctx, s.tlsProfiles.OpenAIOAuthDefaultProfile())
 }
 
 // OpenAIAuthURLResult contains the authorization URL and session info
@@ -131,6 +147,7 @@ type OpenAITokenInfo struct {
 
 // ExchangeCode exchanges authorization code for tokens
 func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExchangeCodeInput) (*OpenAITokenInfo, error) {
+	ctx = s.profileContext(ctx, nil)
 	// Get session
 	session, ok := s.sessionStore.Get(input.SessionID)
 	if !ok {
@@ -214,6 +231,7 @@ func (s *OpenAIOAuthService) RefreshToken(ctx context.Context, refreshToken stri
 
 // RefreshTokenWithClientID refreshes an OpenAI OAuth token with optional client_id.
 func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken string, proxyURL string, clientID string) (*OpenAITokenInfo, error) {
+	ctx = s.profileContext(ctx, nil)
 	tokenResp, err := s.oauthClient.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
 	if err != nil {
 		return nil, err
@@ -337,6 +355,7 @@ func resolveChatGPTSubscriptionAccountID(tokenInfo *OpenAITokenInfo, orgID strin
 
 // RefreshAccountToken refreshes token for an OpenAI OAuth account
 func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *Account) (*OpenAITokenInfo, error) {
+	ctx = s.profileContext(ctx, account)
 	if account.Platform != PlatformOpenAI {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT", "account is not an OpenAI account")
 	}

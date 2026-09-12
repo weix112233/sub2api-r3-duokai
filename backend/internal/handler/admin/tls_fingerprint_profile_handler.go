@@ -1,10 +1,14 @@
 package admin
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
 	"strconv"
 
 	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -21,34 +25,38 @@ func NewTLSFingerprintProfileHandler(service *service.TLSFingerprintProfileServi
 
 // CreateTLSFingerprintProfileRequest 创建模板请求
 type CreateTLSFingerprintProfileRequest struct {
-	Name                string   `json:"name" binding:"required"`
-	Description         *string  `json:"description"`
-	EnableGREASE        *bool    `json:"enable_grease"`
-	CipherSuites        []uint16 `json:"cipher_suites"`
-	Curves              []uint16 `json:"curves"`
-	PointFormats        []uint16 `json:"point_formats"`
-	SignatureAlgorithms []uint16 `json:"signature_algorithms"`
-	ALPNProtocols       []string `json:"alpn_protocols"`
-	SupportedVersions   []uint16 `json:"supported_versions"`
-	KeyShareGroups      []uint16 `json:"key_share_groups"`
-	PSKModes            []uint16 `json:"psk_modes"`
-	Extensions          []uint16 `json:"extensions"`
+	Name                string          `json:"name" binding:"required"`
+	Description         *string         `json:"description"`
+	EnableGREASE        *bool           `json:"enable_grease"`
+	ShuffleExtensions   *bool           `json:"shuffle_extensions"`
+	HTTP2               json.RawMessage `json:"http2"`
+	CipherSuites        []uint16        `json:"cipher_suites"`
+	Curves              []uint16        `json:"curves"`
+	PointFormats        []uint16        `json:"point_formats"`
+	SignatureAlgorithms []uint16        `json:"signature_algorithms"`
+	ALPNProtocols       []string        `json:"alpn_protocols"`
+	SupportedVersions   []uint16        `json:"supported_versions"`
+	KeyShareGroups      []uint16        `json:"key_share_groups"`
+	PSKModes            []uint16        `json:"psk_modes"`
+	Extensions          []uint16        `json:"extensions"`
 }
 
 // UpdateTLSFingerprintProfileRequest 更新模板请求（部分更新）
 type UpdateTLSFingerprintProfileRequest struct {
-	Name                *string  `json:"name"`
-	Description         *string  `json:"description"`
-	EnableGREASE        *bool    `json:"enable_grease"`
-	CipherSuites        []uint16 `json:"cipher_suites"`
-	Curves              []uint16 `json:"curves"`
-	PointFormats        []uint16 `json:"point_formats"`
-	SignatureAlgorithms []uint16 `json:"signature_algorithms"`
-	ALPNProtocols       []string `json:"alpn_protocols"`
-	SupportedVersions   []uint16 `json:"supported_versions"`
-	KeyShareGroups      []uint16 `json:"key_share_groups"`
-	PSKModes            []uint16 `json:"psk_modes"`
-	Extensions          []uint16 `json:"extensions"`
+	Name                *string         `json:"name"`
+	Description         *string         `json:"description"`
+	EnableGREASE        *bool           `json:"enable_grease"`
+	ShuffleExtensions   *bool           `json:"shuffle_extensions"`
+	HTTP2               json.RawMessage `json:"http2"`
+	CipherSuites        []uint16        `json:"cipher_suites"`
+	Curves              []uint16        `json:"curves"`
+	PointFormats        []uint16        `json:"point_formats"`
+	SignatureAlgorithms []uint16        `json:"signature_algorithms"`
+	ALPNProtocols       json.RawMessage `json:"alpn_protocols"`
+	SupportedVersions   []uint16        `json:"supported_versions"`
+	KeyShareGroups      []uint16        `json:"key_share_groups"`
+	PSKModes            []uint16        `json:"psk_modes"`
+	Extensions          []uint16        `json:"extensions"`
 }
 
 // List 获取所有模板
@@ -110,6 +118,17 @@ func (h *TLSFingerprintProfileHandler) Create(c *gin.Context) {
 	if req.EnableGREASE != nil {
 		profile.EnableGREASE = *req.EnableGREASE
 	}
+	if req.ShuffleExtensions != nil {
+		profile.ShuffleExtensions = *req.ShuffleExtensions
+	}
+	if req.HTTP2 != nil {
+		decoder := json.NewDecoder(bytes.NewReader(req.HTTP2))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&profile.HTTP2); err != nil {
+			response.BadRequest(c, "Invalid http2 configuration: "+err.Error())
+			return
+		}
+	}
 
 	created, err := h.service.Create(c.Request.Context(), profile)
 	if err != nil {
@@ -155,6 +174,8 @@ func (h *TLSFingerprintProfileHandler) Update(c *gin.Context) {
 		Name:                existing.Name,
 		Description:         existing.Description,
 		EnableGREASE:        existing.EnableGREASE,
+		ShuffleExtensions:   existing.ShuffleExtensions,
+		HTTP2:               existing.HTTP2,
 		CipherSuites:        existing.CipherSuites,
 		Curves:              existing.Curves,
 		PointFormats:        existing.PointFormats,
@@ -175,6 +196,19 @@ func (h *TLSFingerprintProfileHandler) Update(c *gin.Context) {
 	if req.EnableGREASE != nil {
 		profile.EnableGREASE = *req.EnableGREASE
 	}
+	if req.ShuffleExtensions != nil {
+		profile.ShuffleExtensions = *req.ShuffleExtensions
+	}
+	if req.HTTP2 != nil {
+		var config *tlsfingerprint.HTTP2Config
+		decoder := json.NewDecoder(bytes.NewReader(req.HTTP2))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&config); err != nil {
+			response.BadRequest(c, "Invalid http2 configuration: "+err.Error())
+			return
+		}
+		profile.HTTP2 = config
+	}
 	if req.CipherSuites != nil {
 		profile.CipherSuites = req.CipherSuites
 	}
@@ -188,7 +222,12 @@ func (h *TLSFingerprintProfileHandler) Update(c *gin.Context) {
 		profile.SignatureAlgorithms = req.SignatureAlgorithms
 	}
 	if req.ALPNProtocols != nil {
-		profile.ALPNProtocols = req.ALPNProtocols
+		var protocols []string
+		if err := json.Unmarshal(req.ALPNProtocols, &protocols); err != nil {
+			response.BadRequest(c, "Invalid alpn_protocols: "+err.Error())
+			return
+		}
+		profile.ALPNProtocols = protocols
 	}
 	if req.SupportedVersions != nil {
 		profile.SupportedVersions = req.SupportedVersions
@@ -226,9 +265,59 @@ func (h *TLSFingerprintProfileHandler) Delete(c *gin.Context) {
 	}
 
 	if err := h.service.Delete(c.Request.Context(), id); err != nil {
+		if _, ok := err.(*model.ValidationError); ok {
+			response.BadRequest(c, err.Error())
+			return
+		}
 		response.ErrorFrom(c, err)
 		return
 	}
 
 	response.Success(c, gin.H{"message": "Profile deleted successfully"})
+}
+
+func (h *TLSFingerprintProfileHandler) ParseYAML(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2*tlsfingerprint.MaxProfileYAMLBytes)
+	var req struct {
+		YAML string `json:"yaml" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid YAML request")
+		return
+	}
+	doc, err := tlsfingerprint.ParseProfileYAML([]byte(req.YAML))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.Success(c, doc)
+}
+
+func (h *TLSFingerprintProfileHandler) GetDefaults(c *gin.Context) {
+	defaults, err := h.service.GetDefaults(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, defaults)
+}
+
+func (h *TLSFingerprintProfileHandler) SetDefaults(c *gin.Context) {
+	var req struct {
+		ID *int64 `json:"openai_oauth_default_tls_profile_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "A nonnegative profile ID is required")
+		return
+	}
+	defaults := service.TLSProfileDefaults{OpenAIOAuthDefaultTLSProfileID: *req.ID}
+	if err := h.service.SetDefaults(c.Request.Context(), defaults); err != nil {
+		if _, ok := err.(*model.ValidationError); ok {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, defaults)
 }

@@ -111,9 +111,32 @@ func ProvideOpenAIOAuthService(
 	proxyRepo ProxyRepository,
 	oauthClient OpenAIOAuthClient,
 	privacyClientFactory PrivacyClientFactory,
+	tlsProfiles *TLSFingerprintProfileService,
 ) *OpenAIOAuthService {
 	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
 	svc.SetPrivacyClientFactory(privacyClientFactory)
+	svc.tlsProfiles = tlsProfiles
+	return svc
+}
+
+func ProvideAccountService(accounts AccountRepository, groups GroupRepository, settings *SettingService) *AccountService {
+	svc := NewAccountService(accounts, groups)
+	svc.settings = settings
+	return svc
+}
+
+func ProvideCRSSyncService(accounts AccountRepository, proxies ProxyRepository, oauth *OAuthService,
+	openai *OpenAIOAuthService, gemini *GeminiOAuthService, cfg *config.Config, settings *SettingService) *CRSSyncService {
+	svc := NewCRSSyncService(accounts, proxies, oauth, openai, gemini, cfg)
+	svc.settings = settings
+	return svc
+}
+
+func ProvideOpenAIOperationsService(repo OpenAIOperationsRepository, accounts AccountRepository,
+	settings *SettingService, profiles *TLSFingerprintProfileService, proxies ProxyRepository,
+	gateway *OpenAIGatewayService, refresh *OAuthRefreshAPI, oauth *OpenAIOAuthService) *OpenAIOperationsService {
+	svc := NewOpenAIOperationsService(repo, accounts, settings, profiles, proxies, gateway, refresh, oauth)
+	svc.Start()
 	return svc
 }
 
@@ -884,7 +907,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAuthCacheInvalidationWorker,
 	NewGroupService,
 	NewCompositeRouteResolver,
-	NewAccountService,
+	ProvideAccountService,
 	NewProxyService,
 	NewRedeemService,
 	NewPromoService,
@@ -907,6 +930,7 @@ var ProviderSet = wire.NewSet(
 	wire.Bind(new(AccountRuntimeBlocker), new(*OpenAIGatewayService)),
 	NewOAuthService,
 	ProvideOpenAIOAuthService,
+	ProvideOpenAIOperationsService,
 	ProvideGrokOAuthService,
 	wire.Bind(new(GrokOAuthTokenService), new(*GrokOAuthService)),
 	NewGeminiOAuthService,
@@ -958,7 +982,7 @@ var ProviderSet = wire.NewSet(
 	NewUsageRecordWorkerPool,
 	ProvideSchedulerSnapshotService,
 	NewIdentityService,
-	NewCRSSyncService,
+	ProvideCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
@@ -976,7 +1000,7 @@ var ProviderSet = wire.NewSet(
 	NewUsageCache,
 	NewTotpService,
 	NewErrorPassthroughService,
-	NewTLSFingerprintProfileService,
+	ProvideTLSFingerprintProfileService,
 	NewPluginManager,
 	NewDigestSessionStore,
 	ProvideIdempotencyCoordinator,

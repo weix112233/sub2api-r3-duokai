@@ -50,6 +50,10 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	if os.Getenv("SUB2API_TEST_POSTGRES_SOCKET") != "" || os.Getenv("SUB2API_TEST_REDIS_SOCKET") != "" {
+		os.Exit(runNativeIntegration(m))
+	}
+
 	if !dockerIsAvailable(ctx) {
 		// In CI we expect Docker to be available so integration tests should fail loudly.
 		if os.Getenv("CI") != "" {

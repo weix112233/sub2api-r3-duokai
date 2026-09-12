@@ -1,12 +1,18 @@
 # Sub2API R11 Source Update
 
-Status: current repository source, not a tested binary release.
-The complete application/source candidate was committed as
-`c5ae2f2fcca7bb634f125c4420523ec8c60eab60`, based on R10
+Status: current repository source, not a production-deployment assertion.
+The R11 source history is based on R10
 `10e35ba48ecc38b02cd61ec6dfdd570ac3d145a3`. The current `main` and
-`delivery/r11-source-20260909` branches contain that commit plus the
-source-delivery documentation update. Use the full current commit as the
-source identity; a branch name alone is not immutable.
+`delivery/r11-source-20260909` branches are the Git source surfaces for this
+release line. Use the full current commit as the source identity; a branch
+name alone is not immutable.
+
+The latest source synchronization also includes the complete generic TLS
+profile transport infrastructure and the R11 operational additions. The
+source includes the application code, generated Ent code, database
+migrations, management UI source, embedded frontend build output, focused
+regression tests, and the isolated HTTP/2 engine copy. No production runtime,
+account data, or deployment target is modified by a Git source update.
 
 The user requested source synchronization before local runtime deployment.
 This update does not publish verified binary packages, restart a service or
@@ -45,13 +51,20 @@ No remote container has been updated by this candidate.
 
 The HTTP trace-ID and session-affinity increments received independent static
 reviews without a definite new blocker in their reviewed scopes. Static
-review does not execute the source or prove real consumer behavior.
+review does not prove real consumer behavior.
 
 Regression source covers evolving turns/tools, preserved headers/body,
 explicit idempotency, old request-ID state, RPM/concurrency/cross-key
-controls, WS operation IDs and OAuth affinity/error behavior. The new Go
-tests and fixed builds have not run. Application validation and deployment
-remain blocked on the existing maintenance/resource-admission boundary.
+controls, WS operation IDs and OAuth affinity/error behavior. The current
+source synchronization was revalidated with the Go default suite, the full
+integration-tag suite, the TLS profile unit suite, frontend tests, frontend
+type checking, and the frontend production build. These checks are local
+source evidence; they do not prove production adoption or real-account
+acceptance.
+
+The generalized external TLS capture test remains opt-in. A
+`TLSFINGERPRINT_CAPTURE_URL` and external YAML fixture are required before
+real endpoint JA3 comparison can be claimed.
 
 ## Required Delivery
 

@@ -489,6 +489,10 @@ func (s *httpUpstreamService) acquireClientWithTLS(proxyURL string, accountID in
 // getClientEntryWithTLS 获取或创建带 TLS 指纹的客户端条目
 // TLS 指纹客户端使用独立的缓存键，与普通客户端隔离
 func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
+	profile = profile.Clone()
+	if err := profile.Validate(); err != nil {
+		return nil, err
+	}
 	isolation := s.getIsolationMode()
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
@@ -498,7 +502,7 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
 	// TLS 指纹客户端使用独立的缓存键，加 "tls:" 前缀
 	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
-	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls"
+	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls:" + profile.TransportKey()
 
 	now := time.Now()
 	nowUnix := now.UnixNano()
@@ -556,6 +560,14 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	}
 
 	client := &http.Client{Transport: transport}
+	if profile.HasHTTP2() && transport.DialTLSContext != nil {
+		client.Transport, err = tlsfingerprint.NewTransport(transport, profile)
+		if err != nil {
+			transport.CloseIdleConnections()
+			s.mu.Unlock()
+			return nil, fmt.Errorf("build HTTP/2 fingerprint transport: %w", err)
+		}
+	}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}
@@ -1398,7 +1410,12 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 		case "https":
 			// The fingerprint dialer emits a plaintext CONNECT preface and cannot
 			// establish TLS to an HTTPS proxy. Keep proxy routing via net/http.
-			return buildUpstreamTransport(settings, proxyURL, upstreamProtocolModeDefault)
+			slog.Warn("tls_fingerprint_https_proxy_fallback", "fingerprint_applied", false)
+			base, err := buildUpstreamTransport(settings, proxyURL, upstreamProtocolModeDefault)
+			if err != nil {
+				return nil, err
+			}
+			return base, nil
 		case "http":
 			// HTTP/HTTPS 代理：使用 HTTPProxyDialer（CONNECT 隧道）
 			slog.Debug("tls_fingerprint_transport_http_connect", "proxy", proxyURL.Host)

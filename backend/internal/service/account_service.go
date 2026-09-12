@@ -208,6 +208,7 @@ type UpdateAccountRequest struct {
 type AccountService struct {
 	accountRepo AccountRepository
 	groupRepo   GroupRepository
+	settings    *SettingService
 }
 
 type groupExistenceBatchChecker interface {
@@ -224,6 +225,16 @@ func NewAccountService(accountRepo AccountRepository, groupRepo GroupRepository)
 
 // Create 创建账号
 func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (*Account, error) {
+	if req.Platform == PlatformOpenAI {
+		settings, err := s.settings.GetOpenAIOperationsSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defaulted := applyOpenAINewAccountDefaults(&CreateAccountInput{
+			Platform: req.Platform, ProxyID: req.ProxyID, Extra: req.Extra, Concurrency: req.Concurrency,
+		}, settings.NewAccountDefaults)
+		req.ProxyID, req.Extra, req.Concurrency = defaulted.ProxyID, defaulted.Extra, defaulted.Concurrency
+	}
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
 		if err := s.validateGroupIDsExist(ctx, req.GroupIDs); err != nil {

@@ -3,6 +3,7 @@ package schema
 
 import (
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect"
@@ -51,6 +52,13 @@ func (TLSFingerprintProfile) Fields() []ent.Field {
 		// enable_grease: 是否启用 GREASE 扩展（Chrome 使用，Node.js 不使用）
 		field.Bool("enable_grease").
 			Default(false),
+
+		field.Bool("shuffle_extensions").
+			Default(false),
+
+		field.JSON("http2", &tlsfingerprint.HTTP2Config{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 
 		// cipher_suites: TLS 加密套件列表（顺序敏感，影响 JA3）
 		field.JSON("cipher_suites", []uint16{}).

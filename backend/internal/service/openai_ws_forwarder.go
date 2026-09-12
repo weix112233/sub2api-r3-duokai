@@ -278,7 +278,7 @@ func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {
 	}
 	s.openaiWSPoolOnce.Do(func() {
 		if s.openaiWSPool == nil {
-			s.openaiWSPool = newOpenAIWSConnPool(s.cfg)
+			s.openaiWSPool = newOpenAIWSConnPool(s.cfg, s.resolveTLSProfile)
 		}
 	})
 	return s.openaiWSPool

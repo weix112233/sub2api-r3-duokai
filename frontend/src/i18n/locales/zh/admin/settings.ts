@@ -1313,6 +1313,12 @@ export default {
 
     // TLS 指纹模板
     tlsFingerprintProfiles: {
+      platformDefault: 'OpenAI OAuth 默认 TLS 画像',
+      unset: '未设置',
+      inherit: '继承默认',
+      noALPN: '无 ALPN',
+      customALPN: '自定义 ALPN',
+      shuffleExtensions: '每连接随机排列扩展',
       title: 'TLS 指纹模板',
       description: '管理 TLS 指纹模板，用于模拟特定客户端的 TLS 握手特征',
       createProfile: '创建模板',
@@ -1336,7 +1342,7 @@ export default {
         openCollector: '打开采集器',
         parseYaml: '解析 YAML',
         yamlParsed: 'YAML 解析成功，字段已自动填充',
-        yamlParseFailed: 'YAML 解析失败：未找到 name 字段',
+        yamlParseFailed: 'YAML 配置无效',
         name: '模板名称',
         namePlaceholder: '例如 macOS Node.js v24',
         description: '描述',

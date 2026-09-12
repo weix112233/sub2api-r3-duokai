@@ -2,7 +2,8 @@ package service
 
 import (
 	"context"
-	"math/rand/v2"
+	"encoding/binary"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -31,12 +32,14 @@ type TLSFingerprintProfileCache interface {
 
 // TLSFingerprintProfileService TLS 指纹模板管理服务
 type TLSFingerprintProfileService struct {
-	repo  TLSFingerprintProfileRepository
-	cache TLSFingerprintProfileCache
+	repo     TLSFingerprintProfileRepository
+	cache    TLSFingerprintProfileCache
+	settings SettingRepository
 
 	// 本地 ID→Profile 映射缓存，用于 DoWithTLS 热路径快速查找
-	localCache map[int64]*model.TLSFingerprintProfile
-	localMu    sync.RWMutex
+	localCache           map[int64]*model.TLSFingerprintProfile
+	localMu              sync.RWMutex
+	openAIOAuthDefaultID int64
 }
 
 // NewTLSFingerprintProfileService 创建 TLS 指纹模板服务
@@ -44,9 +47,14 @@ func NewTLSFingerprintProfileService(
 	repo TLSFingerprintProfileRepository,
 	cache TLSFingerprintProfileCache,
 ) *TLSFingerprintProfileService {
+	return newTLSFingerprintProfileService(repo, cache, nil)
+}
+
+func newTLSFingerprintProfileService(repo TLSFingerprintProfileRepository, cache TLSFingerprintProfileCache, settings SettingRepository) *TLSFingerprintProfileService {
 	svc := &TLSFingerprintProfileService{
 		repo:       repo,
 		cache:      cache,
+		settings:   settings,
 		localCache: make(map[int64]*model.TLSFingerprintProfile),
 	}
 
@@ -119,6 +127,13 @@ func (s *TLSFingerprintProfileService) Update(ctx context.Context, profile *mode
 
 // Delete 删除模板
 func (s *TLSFingerprintProfileService) Delete(ctx context.Context, id int64) error {
+	defaults, err := s.GetDefaults(ctx)
+	if err != nil {
+		return err
+	}
+	if id == defaults.OpenAIOAuthDefaultTLSProfileID {
+		return &model.ValidationError{Field: "id", Message: "clear the platform default before deleting this profile"}
+	}
 	if err := s.repo.Delete(ctx, id); err != nil {
 		return err
 	}
@@ -145,8 +160,9 @@ func (s *TLSFingerprintProfileService) GetProfileByID(id int64) *tlsfingerprint.
 	return nil
 }
 
-// getRandomProfile 从本地缓存中随机选择一个 Profile
-func (s *TLSFingerprintProfileService) getRandomProfile() *tlsfingerprint.Profile {
+// Rendezvous hashing makes random-mode assignment stable across requests,
+// restarts and cache ordering. Only pool membership changes may reassign it.
+func (s *TLSFingerprintProfileService) getAccountProfile(accountID int64) *tlsfingerprint.Profile {
 	s.localMu.RLock()
 	defer s.localMu.RUnlock()
 
@@ -154,18 +170,26 @@ func (s *TLSFingerprintProfileService) getRandomProfile() *tlsfingerprint.Profil
 		return nil
 	}
 
-	// 收集所有 profile
-	profiles := make([]*model.TLSFingerprintProfile, 0, len(s.localCache))
+	var selected *model.TLSFingerprintProfile
+	var best uint64
 	for _, p := range s.localCache {
 		if p != nil {
-			profiles = append(profiles, p)
+			var key [16]byte
+			binary.BigEndian.PutUint64(key[:8], uint64(accountID))
+			binary.BigEndian.PutUint64(key[8:], uint64(p.ID))
+			hash := fnv.New64a()
+			_, _ = hash.Write(key[:])
+			score := hash.Sum64()
+			if selected == nil || score > best || score == best && p.ID < selected.ID {
+				selected, best = p, score
+			}
 		}
 	}
-	if len(profiles) == 0 {
+	if selected == nil {
 		return nil
 	}
 
-	return profiles[rand.IntN(len(profiles))].ToTLSProfile()
+	return selected.ToTLSProfile()
 }
 
 // ResolveTLSProfile 根据 Account 的配置解析出运行时 TLS Profile
@@ -185,9 +209,18 @@ func (s *TLSFingerprintProfileService) ResolveTLSProfile(account *Account) *tlsf
 		}
 	}
 	if id == -1 {
-		// 随机选择一个 profile
-		if p := s.getRandomProfile(); p != nil {
+		if p := s.getAccountProfile(account.ID); p != nil {
 			return p
+		}
+	}
+	if id == 0 && account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+		s.localMu.RLock()
+		defaultID := s.openAIOAuthDefaultID
+		s.localMu.RUnlock()
+		if defaultID > 0 {
+			if p := s.GetProfileByID(defaultID); p != nil {
+				return p
+			}
 		}
 	}
 	// TLS 启用但无绑定 profile → 空 Profile → dialer 使用内置默认值
@@ -200,7 +233,7 @@ func (s *TLSFingerprintProfileService) refreshLocalCache(ctx context.Context) er
 	if s.cache != nil {
 		if profiles, ok := s.cache.Get(ctx); ok {
 			s.setLocalCache(profiles)
-			return nil
+			return s.refreshDefaults(ctx)
 		}
 	}
 	return s.reloadFromDB(ctx)
@@ -219,7 +252,7 @@ func (s *TLSFingerprintProfileService) reloadFromDB(ctx context.Context) error {
 	}
 
 	s.setLocalCache(profiles)
-	return nil
+	return s.refreshDefaults(ctx)
 }
 
 func (s *TLSFingerprintProfileService) setLocalCache(profiles []*model.TLSFingerprintProfile) {

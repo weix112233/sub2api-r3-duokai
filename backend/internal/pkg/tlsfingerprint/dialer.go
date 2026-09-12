@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	utls "github.com/refraction-networking/utls"
@@ -18,19 +19,22 @@ import (
 )
 
 // Profile contains TLS fingerprint configuration.
-// All slice fields use built-in defaults when empty.
+// Slice fields use built-in defaults when empty, except ALPNProtocols:
+// nil inherits the default and an explicit empty slice disables ALPN.
 type Profile struct {
-	Name                string // Profile name for identification
-	CipherSuites        []uint16
-	Curves              []uint16
-	PointFormats        []uint16
-	EnableGREASE        bool
-	SignatureAlgorithms []uint16 // Empty uses defaultSignatureAlgorithms
-	ALPNProtocols       []string // Empty uses ["http/1.1"]
-	SupportedVersions   []uint16 // Empty uses [TLS1.3, TLS1.2]
-	KeyShareGroups      []uint16 // Empty uses [X25519]
-	PSKModes            []uint16 // Empty uses [psk_dhe_ke]
-	Extensions          []uint16 // Extension type IDs in order; empty uses default Node.js 24.x order
+	Name                string       `json:"name" yaml:"name"`
+	CipherSuites        []uint16     `json:"cipher_suites" yaml:"cipher_suites"`
+	Curves              []uint16     `json:"curves" yaml:"curves"`
+	PointFormats        []uint16     `json:"point_formats" yaml:"point_formats"`
+	EnableGREASE        bool         `json:"enable_grease" yaml:"enable_grease"`
+	ShuffleExtensions   bool         `json:"shuffle_extensions" yaml:"shuffle_extensions"`
+	HTTP2               *HTTP2Config `json:"http2,omitempty" yaml:"http2,omitempty"`
+	SignatureAlgorithms []uint16     `json:"signature_algorithms" yaml:"signature_algorithms"`
+	ALPNProtocols       []string     `json:"alpn_protocols" yaml:"alpn_protocols"`
+	SupportedVersions   []uint16     `json:"supported_versions" yaml:"supported_versions"`
+	KeyShareGroups      []uint16     `json:"key_share_groups" yaml:"key_share_groups"`
+	PSKModes            []uint16     `json:"psk_modes" yaml:"psk_modes"`
+	Extensions          []uint16     `json:"extensions" yaml:"extensions"`
 }
 
 // Dialer creates TLS connections with custom fingerprints.
@@ -124,24 +128,32 @@ func NewDialer(profile *Profile, baseDialer func(ctx context.Context, network, a
 	if baseDialer == nil {
 		baseDialer = (&net.Dialer{}).DialContext
 	}
-	return &Dialer{profile: profile, baseDialer: baseDialer}
+	return &Dialer{profile: profile.Clone(), baseDialer: baseDialer}
 }
 
 // NewHTTPProxyDialer creates a new TLS fingerprint dialer that works through HTTP/HTTPS proxies.
 // It establishes a CONNECT tunnel before performing TLS handshake with custom fingerprint.
 func NewHTTPProxyDialer(profile *Profile, proxyURL *url.URL) *HTTPProxyDialer {
-	return &HTTPProxyDialer{profile: profile, proxyURL: proxyURL}
+	return &HTTPProxyDialer{profile: profile.Clone(), proxyURL: proxyURL}
 }
 
 // NewSOCKS5ProxyDialer creates a new TLS fingerprint dialer that works through SOCKS5 proxies.
 // It establishes a SOCKS5 tunnel before performing TLS handshake with custom fingerprint.
 func NewSOCKS5ProxyDialer(profile *Profile, proxyURL *url.URL) *SOCKS5ProxyDialer {
-	return &SOCKS5ProxyDialer{profile: profile, proxyURL: proxyURL}
+	return &SOCKS5ProxyDialer{profile: profile.Clone(), proxyURL: proxyURL}
 }
 
 // DialTLSContext establishes a TLS connection through SOCKS5 proxy with the configured fingerprint.
 // Flow: SOCKS5 CONNECT to target -> TLS handshake with utls on the tunnel
 func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := d.dialTunnel(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return performTLSHandshake(ctx, conn, d.profile, addr)
+}
+
+func (d *SOCKS5ProxyDialer) dialTunnel(ctx context.Context, network, addr string) (net.Conn, error) {
 	slog.Debug("tls_fingerprint_socks5_connecting", "proxy", d.proxyURL.Host, "target", addr)
 
 	// Step 1: Create SOCKS5 dialer
@@ -169,20 +181,31 @@ func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr st
 
 	// Step 2: Establish SOCKS5 tunnel to target
 	slog.Debug("tls_fingerprint_socks5_establishing_tunnel", "target", addr)
-	conn, err := socksDialer.Dial("tcp", addr)
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("SOCKS5 dialer does not support cancellation")
+	}
+	conn, err := contextDialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		slog.Debug("tls_fingerprint_socks5_connect_failed", "error", err)
 		return nil, fmt.Errorf("SOCKS5 connect: %w", err)
 	}
 	slog.Debug("tls_fingerprint_socks5_tunnel_established")
 
-	// Step 3: Perform TLS handshake on the tunnel with utls fingerprint
-	return performTLSHandshake(ctx, conn, d.profile, addr)
+	return conn, nil
 }
 
 // DialTLSContext establishes a TLS connection through HTTP proxy with the configured fingerprint.
 // Flow: TCP connect to proxy -> CONNECT tunnel -> TLS handshake with utls
 func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := d.dialTunnel(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return performTLSHandshake(ctx, conn, d.profile, addr)
+}
+
+func (d *HTTPProxyDialer) dialTunnel(ctx context.Context, network, addr string) (net.Conn, error) {
 	slog.Debug("tls_fingerprint_http_proxy_connecting", "proxy", d.proxyURL.Host, "target", addr)
 
 	// Step 1: TCP connect to proxy server
@@ -255,8 +278,7 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	}
 	slog.Debug("tls_fingerprint_http_proxy_tunnel_established")
 
-	// Step 4: Perform TLS handshake on the tunnel with utls fingerprint
-	return performTLSHandshake(ctx, conn, d.profile, addr)
+	return conn, nil
 }
 
 // DialTLSContext establishes a TLS connection with the configured fingerprint.
@@ -279,6 +301,10 @@ func (d *Dialer) DialTLSContext(ctx context.Context, network, addr string) (net.
 // It builds a ClientHello spec from the profile, applies it, and completes the handshake.
 // On failure, conn is closed and an error is returned.
 func performTLSHandshake(ctx context.Context, conn net.Conn, profile *Profile, addr string) (net.Conn, error) {
+	if err := profile.Validate(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
@@ -343,6 +369,7 @@ func isGREASEValue(v uint16) bool {
 // buildClientHelloSpecFromProfile constructs ClientHelloSpec from a Profile.
 // This is a standalone function that can be used by both Dialer and HTTPProxyDialer.
 func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
+	profile = profile.Clone()
 	// Resolve effective values (profile overrides or built-in defaults)
 	cipherSuites := defaultCipherSuites
 	if profile != nil && len(profile.CipherSuites) > 0 {
@@ -368,7 +395,7 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 	}
 
 	alpnProtocols := []string{"http/1.1"}
-	if profile != nil && len(profile.ALPNProtocols) > 0 {
+	if profile != nil && profile.ALPNProtocols != nil {
 		alpnProtocols = profile.ALPNProtocols
 	}
 
@@ -422,9 +449,13 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 		case 13: // signature_algorithms
 			extensions = append(extensions, &utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: signatureAlgorithms})
 		case 16: // alpn
-			extensions = append(extensions, &utls.ALPNExtension{AlpnProtocols: alpnProtocols})
+			if len(alpnProtocols) > 0 {
+				extensions = append(extensions, &utls.ALPNExtension{AlpnProtocols: alpnProtocols})
+			}
 		case 18: // signed_certificate_timestamp
 			extensions = append(extensions, &utls.SCTExtension{})
+		case 21: // padding
+			extensions = append(extensions, &utls.UtlsPaddingExtension{GetPaddingLen: utls.BoringPaddingStyle})
 		case 23: // extended_master_secret
 			extensions = append(extensions, &utls.ExtendedMasterSecretExtension{})
 		case 35: // session_ticket
@@ -456,12 +487,32 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 		extensions = append(extensions, &utls.UtlsGREASEExtension{})
 	}
 
+	if profile != nil && profile.ShuffleExtensions {
+		extensions = utls.ShuffleChromeTLSExtensions(extensions)
+	}
+
+	minVersion, maxVersion := uint16(utls.VersionTLS10), uint16(utls.VersionTLS13)
+	if profile != nil && len(profile.SupportedVersions) > 0 {
+		minVersion, maxVersion = utls.VersionTLS13, utls.VersionTLS10
+		for _, version := range profile.SupportedVersions {
+			if !isGREASEValue(version) {
+				minVersion = min(minVersion, version)
+				maxVersion = max(maxVersion, version)
+			}
+		}
+	}
+	// Without supported_versions the legacy ClientHello version negotiates at
+	// most TLS 1.2. Do not let uTLS synthesize TLS 1.3 for a legacy-only profile.
+	if !slices.Contains(extOrder, uint16(43)) {
+		maxVersion = min(maxVersion, uint16(utls.VersionTLS12))
+	}
+
 	return &utls.ClientHelloSpec{
-		CipherSuites:       cipherSuites,
+		CipherSuites:       slices.Clone(cipherSuites),
 		CompressionMethods: []uint8{0}, // null compression only (standard)
 		Extensions:         extensions,
-		TLSVersMax:         utls.VersionTLS13,
-		TLSVersMin:         utls.VersionTLS10,
+		TLSVersMax:         maxVersion,
+		TLSVersMin:         minVersion,
 	}
 }
 

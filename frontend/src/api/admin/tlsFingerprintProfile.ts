@@ -5,6 +5,17 @@
 
 import { apiClient } from '../client'
 
+export interface HTTP2ProfileConfig {
+  initial_window_size?: number
+  connection_window_update?: number
+  max_header_list_size?: number
+  enable_push?: boolean
+}
+
+export interface TLSProfileDefaults {
+  openai_oauth_default_tls_profile_id: number
+}
+
 /**
  * TLS fingerprint profile interface
  */
@@ -13,11 +24,13 @@ export interface TLSFingerprintProfile {
   name: string
   description: string | null
   enable_grease: boolean
+  shuffle_extensions: boolean
+  http2: HTTP2ProfileConfig | null
   cipher_suites: number[]
   curves: number[]
   point_formats: number[]
   signature_algorithms: number[]
-  alpn_protocols: string[]
+  alpn_protocols: string[] | null
   supported_versions: number[]
   key_share_groups: number[]
   psk_modes: number[]
@@ -33,11 +46,13 @@ export interface CreateProfileRequest {
   name: string
   description?: string | null
   enable_grease?: boolean
+  shuffle_extensions?: boolean
+  http2?: HTTP2ProfileConfig | null
   cipher_suites?: number[]
   curves?: number[]
   point_formats?: number[]
   signature_algorithms?: number[]
-  alpn_protocols?: string[]
+  alpn_protocols?: string[] | null
   supported_versions?: number[]
   key_share_groups?: number[]
   psk_modes?: number[]
@@ -51,11 +66,13 @@ export interface UpdateProfileRequest {
   name?: string
   description?: string | null
   enable_grease?: boolean
+  shuffle_extensions?: boolean
+  http2?: HTTP2ProfileConfig | null
   cipher_suites?: number[]
   curves?: number[]
   point_formats?: number[]
   signature_algorithms?: number[]
-  alpn_protocols?: string[]
+  alpn_protocols?: string[] | null
   supported_versions?: number[]
   key_share_groups?: number[]
   psk_modes?: number[]
@@ -87,12 +104,30 @@ export async function deleteProfile(id: number): Promise<{ message: string }> {
   return data
 }
 
+export async function parseYAML(yaml: string): Promise<CreateProfileRequest> {
+  const { data } = await apiClient.post<CreateProfileRequest>('/admin/tls-fingerprint-profiles/parse-yaml', { yaml })
+  return data
+}
+
+export async function getDefaults(): Promise<TLSProfileDefaults> {
+  const { data } = await apiClient.get<TLSProfileDefaults>('/admin/tls-fingerprint-profiles/defaults')
+  return data
+}
+
+export async function setDefaults(defaults: TLSProfileDefaults): Promise<TLSProfileDefaults> {
+  const { data } = await apiClient.put<TLSProfileDefaults>('/admin/tls-fingerprint-profiles/defaults', defaults)
+  return data
+}
+
 export const tlsFingerprintProfileAPI = {
   list,
   getById,
   create,
   update,
-  delete: deleteProfile
+  delete: deleteProfile,
+  parseYAML,
+  getDefaults,
+  setDefaults
 }
 
 export default tlsFingerprintProfileAPI

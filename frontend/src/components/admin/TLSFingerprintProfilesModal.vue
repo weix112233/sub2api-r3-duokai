@@ -17,6 +17,22 @@
         </button>
       </div>
 
+      <div class="flex flex-wrap items-end gap-3 border-b border-gray-200 pb-4 dark:border-dark-600">
+        <label class="min-w-0 flex-1 text-sm">
+          {{ t('admin.tlsFingerprintProfiles.platformDefault') }}
+          <select v-model.number="defaultProfileID" class="input mt-1" :disabled="loading || !defaultsLoaded">
+            <option :value="0">{{ t('admin.tlsFingerprintProfiles.unset') }}</option>
+            <option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+            <option v-if="defaultProfileID > 0 && !profiles.some(p => p.id === defaultProfileID)" :value="defaultProfileID">
+              #{{ defaultProfileID }}
+            </option>
+          </select>
+        </label>
+        <button type="button" class="btn btn-secondary" :disabled="savingDefaults || !defaultsLoaded || defaultProfileID === savedDefaultProfileID" @click="saveDefaults">
+          {{ t('common.save') }}
+        </button>
+      </div>
+
       <!-- Profiles Table -->
       <div v-if="loading" class="flex items-center justify-center py-8">
         <Icon name="refresh" size="lg" class="animate-spin text-gray-400" />
@@ -86,7 +102,9 @@
                     +{{ profile.alpn_protocols.length - 3 }}
                   </span>
                 </div>
-                <div v-else class="text-xs text-gray-400 dark:text-gray-600">—</div>
+                <div v-else class="text-xs text-gray-400 dark:text-gray-600">
+                  {{ t(profile.alpn_protocols == null ? 'admin.tlsFingerprintProfiles.inherit' : 'admin.tlsFingerprintProfiles.noALPN') }}
+                </div>
               </td>
               <td class="px-3 py-2">
                 <div class="flex items-center gap-1">
@@ -140,7 +158,7 @@
             @paste="handleYamlPaste"
           />
           <div class="mt-1 flex items-center gap-2">
-            <button type="button" @click="parseYamlInput" class="btn btn-secondary btn-sm">
+            <button type="button" @click="parseYamlInput" :disabled="parsingYAML" class="btn btn-secondary btn-sm">
               {{ t('admin.tlsFingerprintProfiles.form.parseYaml') }}
             </button>
             <p class="text-xs text-gray-500 dark:text-gray-400">
@@ -153,7 +171,7 @@
         <hr class="border-gray-200 dark:border-dark-600" />
 
         <!-- Basic Info -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label class="input-label">{{ t('admin.tlsFingerprintProfiles.form.name') }}</label>
             <input
@@ -202,8 +220,13 @@
           </div>
         </div>
 
+        <label class="flex items-center gap-3 text-sm">
+          <input v-model="transportForm.shuffle_extensions" type="checkbox" />
+          {{ t('admin.tlsFingerprintProfiles.shuffleExtensions') }}
+        </label>
+
         <!-- TLS Array Fields - 2 column grid -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label class="input-label text-xs">{{ t('admin.tlsFingerprintProfiles.form.cipherSuites') }}</label>
             <textarea
@@ -289,14 +312,37 @@
 
         <!-- ALPN Protocols - full width -->
         <div>
-          <label class="input-label text-xs">{{ t('admin.tlsFingerprintProfiles.form.alpnProtocols') }}</label>
+          <label class="input-label text-xs" for="tls-alpn-mode">{{ t('admin.tlsFingerprintProfiles.form.alpnProtocols') }}</label>
+          <select id="tls-alpn-mode" v-model="transportForm.alpnMode" class="input mb-2">
+            <option value="inherit">{{ t('admin.tlsFingerprintProfiles.inherit') }}</option>
+            <option value="none">{{ t('admin.tlsFingerprintProfiles.noALPN') }}</option>
+            <option value="custom">{{ t('admin.tlsFingerprintProfiles.customALPN') }}</option>
+          </select>
           <textarea
+            v-if="transportForm.alpnMode === 'custom'"
             v-model="fieldInputs.alpn_protocols"
             rows="2"
             class="input font-mono text-xs"
             :placeholder="'h2, http/1.1'"
           />
         </div>
+        <fieldset class="min-w-0 border-t border-gray-200 pt-3 dark:border-dark-600">
+          <legend class="text-sm font-medium">HTTP/2</legend>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label v-for="key in http2NumericFields" :key="key" class="min-w-0 text-xs">
+              {{ key }}
+              <input v-model="transportForm[key]" type="text" inputmode="numeric" class="input mt-1 font-mono" :placeholder="t('admin.tlsFingerprintProfiles.inherit')" />
+            </label>
+            <label class="min-w-0 text-xs">
+              enable_push
+              <select v-model="transportForm.enable_push" class="input mt-1">
+                <option value="">{{ t('admin.tlsFingerprintProfiles.inherit') }}</option>
+                <option value="true">{{ t('common.enabled') }}</option>
+                <option value="false">{{ t('common.disabled') }}</option>
+              </select>
+            </label>
+          </div>
+        </fieldset>
       </form>
 
       <template #footer>
@@ -327,11 +373,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import type { TLSFingerprintProfile } from '@/api/admin/tlsFingerprintProfile'
+import type { TLSFingerprintProfile, CreateProfileRequest } from '@/api/admin/tlsFingerprintProfile'
+import { http2NumericFields, parseNumericArray, transportFields, transportFormFromProfile } from '@/utils/tlsProfileForm'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -359,6 +406,14 @@ const showDeleteDialog = ref(false)
 const editingProfile = ref<TLSFingerprintProfile | null>(null)
 const deletingProfile = ref<TLSFingerprintProfile | null>(null)
 const yamlInput = ref('')
+const parsingYAML = ref(false)
+const transportForm = reactive(transportFormFromProfile({ name: '' }))
+const defaultProfileID = ref(0)
+const savedDefaultProfileID = ref(0)
+const defaultsLoaded = ref(false)
+const savingDefaults = ref(false)
+let formRevision = 0
+let pasteTimer: ReturnType<typeof setTimeout> | undefined
 
 // Raw string inputs for array fields
 const fieldInputs = reactive({
@@ -379,17 +434,18 @@ const form = reactive({
   enable_grease: false
 })
 
-// Load profiles when dialog opens
-watch(() => props.show, (newVal) => {
-  if (newVal) {
-    loadProfiles()
-  }
-})
-
 const loadProfiles = async () => {
   loading.value = true
+  defaultsLoaded.value = false
   try {
-    profiles.value = await adminAPI.tlsFingerprintProfiles.list()
+    const [items, defaults] = await Promise.all([
+      adminAPI.tlsFingerprintProfiles.list(),
+      adminAPI.tlsFingerprintProfiles.getDefaults()
+    ])
+    profiles.value = items
+    defaultProfileID.value = defaults.openai_oauth_default_tls_profile_id
+    savedDefaultProfileID.value = defaultProfileID.value
+    defaultsLoaded.value = true
   } catch (error) {
     appStore.showError(t('admin.tlsFingerprintProfiles.loadFailed'))
     console.error('Error loading TLS fingerprint profiles:', error)
@@ -398,10 +454,18 @@ const loadProfiles = async () => {
   }
 }
 
+onBeforeUnmount(() => {
+  formRevision++
+  clearTimeout(pasteTimer)
+})
+
 const resetForm = () => {
+  formRevision++
+  clearTimeout(pasteTimer)
   form.name = ''
   form.description = null
   form.enable_grease = false
+  Object.assign(transportForm, transportFormFromProfile({ name: '' }))
   fieldInputs.cipher_suites = ''
   fieldInputs.curves = ''
   fieldInputs.point_formats = ''
@@ -414,99 +478,27 @@ const resetForm = () => {
   yamlInput.value = ''
 }
 
-/**
- * Parse YAML output from tls-fingerprint-web and fill form fields.
- * Expected format:
- *   # comment lines
- *   profile_key:
- *     name: "Profile Name"
- *     enable_grease: false
- *     cipher_suites: [4866, 4867, ...]
- *     alpn_protocols: ["h2", "http/1.1"]
- *     ...
- */
-const parseYamlInput = () => {
+const parseYamlInput = async () => {
   const text = yamlInput.value.trim()
-  if (!text) return
-
-  // Simple YAML parser for flat key-value structure
-  // Extracts "key: value" lines, handling arrays like [1, 2, 3] and ["h2", "http/1.1"]
-  const lines = text.split('\n')
-
-  let foundName = false
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-    // Skip comments and empty lines
-    if (!trimmed || trimmed.startsWith('#')) continue
-
-    // Match "key: value" pattern (must have at least 2 leading spaces to be a property)
-    const match = trimmed.match(/^(\w+):\s*(.+)$/)
-    if (!match) continue
-
-    const [, key, rawValue] = match
-    const value = rawValue.trim()
-
-    switch (key) {
-      case 'name': {
-        // Remove surrounding quotes
-        const unquoted = value.replace(/^["']|["']$/g, '')
-        if (unquoted) {
-          form.name = unquoted
-          foundName = true
-        }
-        break
-      }
-      case 'enable_grease':
-        form.enable_grease = value === 'true'
-        break
-      case 'cipher_suites':
-      case 'curves':
-      case 'point_formats':
-      case 'signature_algorithms':
-      case 'supported_versions':
-      case 'key_share_groups':
-      case 'psk_modes':
-      case 'extensions': {
-        // Parse YAML array: [1, 2, 3] — values are decimal integers from tls-fingerprint-web
-        const arrMatch = value.match(/^\[(.*)?\]$/)
-        if (arrMatch) {
-          const inner = arrMatch[1] || ''
-          fieldInputs[key as keyof typeof fieldInputs] = inner
-            .split(',')
-            .map(s => s.trim())
-            .filter(s => s.length > 0)
-            .join(', ')
-        }
-        break
-      }
-      case 'alpn_protocols': {
-        // Parse string array: ["h2", "http/1.1"]
-        const arrMatch = value.match(/^\[(.*)?\]$/)
-        if (arrMatch) {
-          const inner = arrMatch[1] || ''
-          fieldInputs.alpn_protocols = inner
-            .split(',')
-            .map(s => s.trim().replace(/^["']|["']$/g, ''))
-            .filter(s => s.length > 0)
-            .join(', ')
-        }
-        break
-      }
-    }
-  }
-
-  if (foundName) {
+  if (!text || parsingYAML.value) return
+  const revision = formRevision
+  parsingYAML.value = true
+  try {
+    const profile = await adminAPI.tlsFingerprintProfiles.parseYAML(text)
+    if (revision !== formRevision || yamlInput.value.trim() !== text) return
+    fillForm(profile)
     appStore.showSuccess(t('admin.tlsFingerprintProfiles.form.yamlParsed'))
-  } else {
+  } catch {
     appStore.showError(t('admin.tlsFingerprintProfiles.form.yamlParseFailed'))
+  } finally {
+    parsingYAML.value = false
   }
 }
 
 // Auto-parse on paste event
 const handleYamlPaste = () => {
-  // Use nextTick to ensure v-model has updated
-  setTimeout(() => parseYamlInput(), 50)
+  clearTimeout(pasteTimer)
+  pasteTimer = setTimeout(() => void parseYamlInput(), 0)
 }
 
 const closeFormModal = () => {
@@ -514,26 +506,6 @@ const closeFormModal = () => {
   showEditModal.value = false
   editingProfile.value = null
   resetForm()
-}
-
-// Parse a comma-separated string of numbers supporting both hex (0x...) and decimal
-const parseNumericArray = (input: string): number[] => {
-  if (!input.trim()) return []
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(s => s.startsWith('0x') || s.startsWith('0X') ? parseInt(s, 16) : parseInt(s, 10))
-    .filter(n => !isNaN(n))
-}
-
-// Parse a comma-separated string of string values
-const parseStringArray = (input: string): string[] => {
-  if (!input.trim()) return []
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
 }
 
 // Format a number as hex with 0x prefix and 4-digit padding
@@ -545,11 +517,11 @@ const formatNumericArray = (arr: number[] | null | undefined): string => (arr ??
 // For point_formats and psk_modes (uint8), show as plain numbers (null-safe)
 const formatPlainNumericArray = (arr: number[] | null | undefined): string => (arr ?? []).join(', ')
 
-const handleEdit = (profile: TLSFingerprintProfile) => {
-  editingProfile.value = profile
+const fillForm = (profile: CreateProfileRequest) => {
   form.name = profile.name
-  form.description = profile.description
-  form.enable_grease = profile.enable_grease
+  form.description = profile.description ?? null
+  form.enable_grease = profile.enable_grease ?? false
+  Object.assign(transportForm, transportFormFromProfile(profile))
   fieldInputs.cipher_suites = formatNumericArray(profile.cipher_suites)
   fieldInputs.curves = formatPlainNumericArray(profile.curves)
   fieldInputs.point_formats = formatPlainNumericArray(profile.point_formats)
@@ -559,6 +531,12 @@ const handleEdit = (profile: TLSFingerprintProfile) => {
   fieldInputs.key_share_groups = formatPlainNumericArray(profile.key_share_groups)
   fieldInputs.psk_modes = formatPlainNumericArray(profile.psk_modes)
   fieldInputs.extensions = formatNumericArray(profile.extensions)
+}
+
+const handleEdit = (profile: TLSFingerprintProfile) => {
+  formRevision++
+  editingProfile.value = profile
+  fillForm(profile)
   showEditModal.value = true
 }
 
@@ -579,14 +557,14 @@ const handleSubmit = async () => {
       name: form.name.trim(),
       description: form.description?.trim() || null,
       enable_grease: form.enable_grease,
+      ...transportFields(transportForm, fieldInputs.alpn_protocols),
       cipher_suites: parseNumericArray(fieldInputs.cipher_suites),
       curves: parseNumericArray(fieldInputs.curves),
-      point_formats: parseNumericArray(fieldInputs.point_formats),
+      point_formats: parseNumericArray(fieldInputs.point_formats, 255),
       signature_algorithms: parseNumericArray(fieldInputs.signature_algorithms),
-      alpn_protocols: parseStringArray(fieldInputs.alpn_protocols),
       supported_versions: parseNumericArray(fieldInputs.supported_versions),
       key_share_groups: parseNumericArray(fieldInputs.key_share_groups),
-      psk_modes: parseNumericArray(fieldInputs.psk_modes),
+      psk_modes: parseNumericArray(fieldInputs.psk_modes, 255),
       extensions: parseNumericArray(fieldInputs.extensions)
     }
 
@@ -608,6 +586,21 @@ const handleSubmit = async () => {
   }
 }
 
+const saveDefaults = async () => {
+  savingDefaults.value = true
+  try {
+    const defaults = await adminAPI.tlsFingerprintProfiles.setDefaults({
+      openai_oauth_default_tls_profile_id: defaultProfileID.value
+    })
+    savedDefaultProfileID.value = defaults.openai_oauth_default_tls_profile_id
+    appStore.showSuccess(t('admin.tlsFingerprintProfiles.updateSuccess'))
+  } catch {
+    appStore.showError(t('admin.tlsFingerprintProfiles.saveFailed'))
+  } finally {
+    savingDefaults.value = false
+  }
+}
+
 const confirmDelete = async () => {
   if (!deletingProfile.value) return
 
@@ -622,4 +615,9 @@ const confirmDelete = async () => {
     console.error('Error deleting TLS fingerprint profile:', error)
   }
 }
+
+watch(() => props.show, (show) => {
+  if (show) void loadProfiles()
+  else closeFormModal()
+}, { immediate: true })
 </script>

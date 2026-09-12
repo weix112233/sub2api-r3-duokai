@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -64,9 +65,10 @@ func (e *openAIWSDialError) Unwrap() error {
 }
 
 type openAIWSAcquireRequest struct {
-	Account *Account
-	WSURL   string
-	Headers http.Header
+	Account    *Account
+	tlsProfile *tlsfingerprint.Profile
+	WSURL      string
+	Headers    http.Header
 	// HeadersFactory is evaluated inside dialConn. It exists so credentials
 	// whose authorization is per-dial (Agent Identity) are never cached in
 	// lastAcquire or delayed prewarm state.
@@ -80,6 +82,7 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	tlsTransportKey     string
 	betaFeatures        string
 	codexInstallationID string
 	sessionIDHyphen     string
@@ -628,7 +631,8 @@ type openAIWSPoolMetrics struct {
 type openAIWSConnPool struct {
 	cfg *config.Config
 	// 通过接口解耦底层 WS 客户端实现，默认使用 coder/websocket。
-	clientDialer openAIWSClientDialer
+	clientDialer      openAIWSClientDialer
+	resolveTLSProfile func(*Account) *tlsfingerprint.Profile
 
 	accounts sync.Map // key: int64(accountID), value: *openAIWSAccountPool
 	seq      atomic.Uint64
@@ -640,11 +644,14 @@ type openAIWSConnPool struct {
 	closeOnce    sync.Once
 }
 
-func newOpenAIWSConnPool(cfg *config.Config) *openAIWSConnPool {
+func newOpenAIWSConnPool(cfg *config.Config, resolvers ...func(*Account) *tlsfingerprint.Profile) *openAIWSConnPool {
 	pool := &openAIWSConnPool{
 		cfg:          cfg,
 		clientDialer: newDefaultOpenAIWSClientDialer(),
 		workerStopCh: make(chan struct{}),
+	}
+	if len(resolvers) > 0 {
+		pool.resolveTLSProfile = resolvers[0]
 	}
 	pool.startBackgroundWorkers()
 	return pool
@@ -863,8 +870,11 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 	}
 
 retryAcquire:
+	if p.resolveTLSProfile != nil {
+		req.tlsProfile = p.resolveTLSProfile(req.Account).ForWebSocket()
+	}
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers, req.tlsProfile)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -1796,6 +1806,12 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	if p == nil || p.clientDialer == nil {
 		return nil, errors.New("openai ws client dialer is nil")
 	}
+	// Prewarm requests may outlive a profile edit. Resolve a fresh snapshot at
+	// dial time and bind the resulting connection to that same snapshot.
+	if p.resolveTLSProfile != nil {
+		req.tlsProfile = p.resolveTLSProfile(req.Account).ForWebSocket()
+	}
+	ctx = tlsfingerprint.WithProfile(ctx, req.tlsProfile)
 	headers := cloneHeader(req.Headers)
 	var err error
 	if req.HeadersFactory != nil {
@@ -1827,7 +1843,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	}
 	id := p.nextConnID(req.Account.ID)
 	pooledConn := newOpenAIWSConn(id, req.Account.ID, conn, handshakeHeaders)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers, req.tlsProfile)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -1992,6 +2008,7 @@ func (p *openAIWSConnPool) dialTimeout() time.Duration {
 
 func cloneOpenAIWSAcquireRequest(req openAIWSAcquireRequest) openAIWSAcquireRequest {
 	copied := req
+	copied.tlsProfile = req.tlsProfile.Clone()
 	copied.Headers = cloneHeader(req.Headers)
 	copied.WSURL = stringsTrim(req.WSURL)
 	copied.ProxyURL = stringsTrim(req.ProxyURL)
@@ -2010,7 +2027,7 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
 	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
 		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
-		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers)
+		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers, a.tlsProfile) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers, b.tlsProfile)
 }
 
 func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
@@ -2043,9 +2060,12 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 // 会话身份的握手不再复用同一条上游连接（upstream 按握手头绑定会话上下文）。
 // 按有效指纹模式分层：off 只比 betaFeatures（与存量行为完全一致）；device 追加
 // installation 维度；session/full/machine 追加全部会话身份维度。
-func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header) openAIWSHandshakeCompatibilityKey {
+func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header, profiles ...*tlsfingerprint.Profile) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+	}
+	if len(profiles) > 0 && profiles[0] != nil {
+		key.tlsTransportKey = profiles[0].TransportKey()
 	}
 	mode := activeCodexFingerprintMode(account)
 	if mode == codexFingerprintOff {

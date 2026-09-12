@@ -1,0 +1,82 @@
+{
+  "module": "golang.org/x/net",
+  "version": "v0.56.0",
+  "files": [
+    {
+      "source": "http2/transport.go",
+      "sha256": "2a9e06b766540b61e7a62333c85ec8956e113e8b37380e0d77e648821d5928fa"
+    },
+    {
+      "source": "http2/transport_common.go",
+      "sha256": "baa716a2225da933b038f9111fce7ca7e9771342abb7a9e391650d3f14cb9a4d"
+    },
+    {
+      "source": "http2/client_conn_pool.go",
+      "sha256": "ee773ca6b4e00a999f916214138ca74ea06a9d3d8d6fdffba354871587019dcf"
+    },
+    {
+      "source": "http2/flow.go",
+      "sha256": "cdf7ad077c182118d3967a63d33f0731717b060b43bded46796d226c8fcb11f2"
+    },
+    {
+      "source": "http2/pipe.go",
+      "sha256": "3fbe00025d441802c154549f5bd7562b9937ff43f1ce64c987bda75fcaf7f518"
+    },
+    {
+      "source": "http2/databuffer.go",
+      "sha256": "ad318dab6f9b9520c5b2262a74928f199befd7c8565454a89c1d2fc10bf901d6"
+    },
+    {
+      "source": "http2/frame.go",
+      "sha256": "7087a540c7d8c93b142d0b97b6f3a6b780be48863cbd0cf2187de845743857b7"
+    },
+    {
+      "source": "http2/errors.go",
+      "sha256": "fde1284c85d1730c86183ce604cfb22e917edfcd4ed9544a4a12d511befbea49"
+    },
+    {
+      "source": "http2/http2.go",
+      "sha256": "e1b38f7628feed3fd9482d2e705f07a8aecf58d8068c09e012a56b6b448452c2"
+    },
+    {
+      "source": "http2/ascii.go",
+      "sha256": "d8ee0e0a6b2c41a17a18e263b7f9b5701174dbe10e59496daadc9db6a647f708"
+    },
+    {
+      "source": "http2/gotrack.go",
+      "sha256": "2e404e35aa3d9c0350ce72191e5b1b525c6bb8ead1ce5bf8d8533aaf1c8efd3c"
+    },
+    {
+      "source": "http2/unencrypted.go",
+      "sha256": "8efbd1156e499e01d14dd2c8095a5318256d34f24d25fd74ced760dde5b5ab42"
+    },
+    {
+      "source": "http2/config.go",
+      "sha256": "d167984b5523fecaf2b99b626c7a4be2d7fc2268b6719b01913263cb80ca4d5a"
+    },
+    {
+      "source": "http2/config_go126.go",
+      "sha256": "59a922ba01b0c7a4c2a5155613306f2bce7fb358992541b321b6df5c594dd2c6"
+    },
+    {
+      "source": "internal/httpcommon/ascii.go",
+      "sha256": "7446cfcfe70f682d5ad3102ca0aeef3bfbef86c799f0c61af9be9e942fe950dd"
+    },
+    {
+      "source": "internal/httpcommon/headermap.go",
+      "sha256": "ee95dbc37a39a5a9ac3bc048ba3233f13d3f5e18e2faa8ba44d588218a888ade"
+    },
+    {
+      "source": "internal/httpcommon/request.go",
+      "sha256": "ba011a886d277d17f10f5d2828cd4da7c920b63801ec6912cfdb99877787bc4f"
+    },
+    {
+      "source": "internal/httpsfv/httpsfv.go",
+      "sha256": "bb64129bf25faa9065a029ec0f0b7ffd61abbb49e561100ff66614ab5705001a"
+    },
+    {
+      "source": "http2/clientconn.go",
+      "sha256": "75517095356686258410eebac3a058152f4e4fcf85d98732e55e72db3d8860b8"
+    }
+  ]
+}

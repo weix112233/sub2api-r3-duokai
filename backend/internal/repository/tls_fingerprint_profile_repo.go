@@ -50,8 +50,12 @@ func (r *tlsFingerprintProfileRepository) GetByID(ctx context.Context, id int64)
 func (r *tlsFingerprintProfileRepository) Create(ctx context.Context, p *model.TLSFingerprintProfile) (*model.TLSFingerprintProfile, error) {
 	builder := r.client.TLSFingerprintProfile.Create().
 		SetName(p.Name).
+		SetShuffleExtensions(p.ShuffleExtensions).
 		SetEnableGrease(p.EnableGREASE)
 
+	if p.HTTP2 != nil {
+		builder.SetHttp2(p.HTTP2)
+	}
 	if p.Description != nil {
 		builder.SetDescription(*p.Description)
 	}
@@ -67,7 +71,7 @@ func (r *tlsFingerprintProfileRepository) Create(ctx context.Context, p *model.T
 	if len(p.SignatureAlgorithms) > 0 {
 		builder.SetSignatureAlgorithms(p.SignatureAlgorithms)
 	}
-	if len(p.ALPNProtocols) > 0 {
+	if p.ALPNProtocols != nil {
 		builder.SetAlpnProtocols(p.ALPNProtocols)
 	}
 	if len(p.SupportedVersions) > 0 {
@@ -94,8 +98,14 @@ func (r *tlsFingerprintProfileRepository) Create(ctx context.Context, p *model.T
 func (r *tlsFingerprintProfileRepository) Update(ctx context.Context, p *model.TLSFingerprintProfile) (*model.TLSFingerprintProfile, error) {
 	builder := r.client.TLSFingerprintProfile.UpdateOneID(p.ID).
 		SetName(p.Name).
+		SetShuffleExtensions(p.ShuffleExtensions).
 		SetEnableGrease(p.EnableGREASE)
 
+	if p.HTTP2 != nil {
+		builder.SetHttp2(p.HTTP2)
+	} else {
+		builder.ClearHttp2()
+	}
 	if p.Description != nil {
 		builder.SetDescription(*p.Description)
 	} else {
@@ -122,7 +132,7 @@ func (r *tlsFingerprintProfileRepository) Update(ctx context.Context, p *model.T
 	} else {
 		builder.ClearSignatureAlgorithms()
 	}
-	if len(p.ALPNProtocols) > 0 {
+	if p.ALPNProtocols != nil {
 		builder.SetAlpnProtocols(p.ALPNProtocols)
 	} else {
 		builder.ClearAlpnProtocols()
@@ -167,6 +177,8 @@ func (r *tlsFingerprintProfileRepository) toModel(e *ent.TLSFingerprintProfile) 
 		Name:                e.Name,
 		Description:         e.Description,
 		EnableGREASE:        e.EnableGrease,
+		ShuffleExtensions:   e.ShuffleExtensions,
+		HTTP2:               e.Http2,
 		CipherSuites:        e.CipherSuites,
 		Curves:              e.Curves,
 		PointFormats:        e.PointFormats,
@@ -192,9 +204,6 @@ func (r *tlsFingerprintProfileRepository) toModel(e *ent.TLSFingerprintProfile) 
 	}
 	if p.SignatureAlgorithms == nil {
 		p.SignatureAlgorithms = []uint16{}
-	}
-	if p.ALPNProtocols == nil {
-		p.ALPNProtocols = []string{}
 	}
 	if p.SupportedVersions == nil {
 		p.SupportedVersions = []uint16{}

@@ -53,6 +53,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
 
 const (
@@ -41941,6 +41942,8 @@ type TLSFingerprintProfileMutation struct {
 	name                       *string
 	description                *string
 	enable_grease              *bool
+	shuffle_extensions         *bool
+	http2                      **tlsfingerprint.HTTP2Config
 	cipher_suites              *[]uint16
 	appendcipher_suites        []uint16
 	curves                     *[]uint16
@@ -42254,6 +42257,91 @@ func (m *TLSFingerprintProfileMutation) OldEnableGrease(ctx context.Context) (v 
 // ResetEnableGrease resets all changes to the "enable_grease" field.
 func (m *TLSFingerprintProfileMutation) ResetEnableGrease() {
 	m.enable_grease = nil
+}
+
+// SetShuffleExtensions sets the "shuffle_extensions" field.
+func (m *TLSFingerprintProfileMutation) SetShuffleExtensions(b bool) {
+	m.shuffle_extensions = &b
+}
+
+// ShuffleExtensions returns the value of the "shuffle_extensions" field in the mutation.
+func (m *TLSFingerprintProfileMutation) ShuffleExtensions() (r bool, exists bool) {
+	v := m.shuffle_extensions
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldShuffleExtensions returns the old "shuffle_extensions" field's value of the TLSFingerprintProfile entity.
+// If the TLSFingerprintProfile object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TLSFingerprintProfileMutation) OldShuffleExtensions(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldShuffleExtensions is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldShuffleExtensions requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldShuffleExtensions: %w", err)
+	}
+	return oldValue.ShuffleExtensions, nil
+}
+
+// ResetShuffleExtensions resets all changes to the "shuffle_extensions" field.
+func (m *TLSFingerprintProfileMutation) ResetShuffleExtensions() {
+	m.shuffle_extensions = nil
+}
+
+// SetHttp2 sets the "http2" field.
+func (m *TLSFingerprintProfileMutation) SetHttp2(t *tlsfingerprint.HTTP2Config) {
+	m.http2 = &t
+}
+
+// Http2 returns the value of the "http2" field in the mutation.
+func (m *TLSFingerprintProfileMutation) Http2() (r *tlsfingerprint.HTTP2Config, exists bool) {
+	v := m.http2
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHttp2 returns the old "http2" field's value of the TLSFingerprintProfile entity.
+// If the TLSFingerprintProfile object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TLSFingerprintProfileMutation) OldHttp2(ctx context.Context) (v *tlsfingerprint.HTTP2Config, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHttp2 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHttp2 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHttp2: %w", err)
+	}
+	return oldValue.Http2, nil
+}
+
+// ClearHttp2 clears the value of the "http2" field.
+func (m *TLSFingerprintProfileMutation) ClearHttp2() {
+	m.http2 = nil
+	m.clearedFields[tlsfingerprintprofile.FieldHttp2] = struct{}{}
+}
+
+// Http2Cleared returns if the "http2" field was cleared in this mutation.
+func (m *TLSFingerprintProfileMutation) Http2Cleared() bool {
+	_, ok := m.clearedFields[tlsfingerprintprofile.FieldHttp2]
+	return ok
+}
+
+// ResetHttp2 resets all changes to the "http2" field.
+func (m *TLSFingerprintProfileMutation) ResetHttp2() {
+	m.http2 = nil
+	delete(m.clearedFields, tlsfingerprintprofile.FieldHttp2)
 }
 
 // SetCipherSuites sets the "cipher_suites" field.
@@ -42875,7 +42963,7 @@ func (m *TLSFingerprintProfileMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TLSFingerprintProfileMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 16)
 	if m.created_at != nil {
 		fields = append(fields, tlsfingerprintprofile.FieldCreatedAt)
 	}
@@ -42890,6 +42978,12 @@ func (m *TLSFingerprintProfileMutation) Fields() []string {
 	}
 	if m.enable_grease != nil {
 		fields = append(fields, tlsfingerprintprofile.FieldEnableGrease)
+	}
+	if m.shuffle_extensions != nil {
+		fields = append(fields, tlsfingerprintprofile.FieldShuffleExtensions)
+	}
+	if m.http2 != nil {
+		fields = append(fields, tlsfingerprintprofile.FieldHttp2)
 	}
 	if m.cipher_suites != nil {
 		fields = append(fields, tlsfingerprintprofile.FieldCipherSuites)
@@ -42936,6 +43030,10 @@ func (m *TLSFingerprintProfileMutation) Field(name string) (ent.Value, bool) {
 		return m.Description()
 	case tlsfingerprintprofile.FieldEnableGrease:
 		return m.EnableGrease()
+	case tlsfingerprintprofile.FieldShuffleExtensions:
+		return m.ShuffleExtensions()
+	case tlsfingerprintprofile.FieldHttp2:
+		return m.Http2()
 	case tlsfingerprintprofile.FieldCipherSuites:
 		return m.CipherSuites()
 	case tlsfingerprintprofile.FieldCurves:
@@ -42973,6 +43071,10 @@ func (m *TLSFingerprintProfileMutation) OldField(ctx context.Context, name strin
 		return m.OldDescription(ctx)
 	case tlsfingerprintprofile.FieldEnableGrease:
 		return m.OldEnableGrease(ctx)
+	case tlsfingerprintprofile.FieldShuffleExtensions:
+		return m.OldShuffleExtensions(ctx)
+	case tlsfingerprintprofile.FieldHttp2:
+		return m.OldHttp2(ctx)
 	case tlsfingerprintprofile.FieldCipherSuites:
 		return m.OldCipherSuites(ctx)
 	case tlsfingerprintprofile.FieldCurves:
@@ -43034,6 +43136,20 @@ func (m *TLSFingerprintProfileMutation) SetField(name string, value ent.Value) e
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetEnableGrease(v)
+		return nil
+	case tlsfingerprintprofile.FieldShuffleExtensions:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetShuffleExtensions(v)
+		return nil
+	case tlsfingerprintprofile.FieldHttp2:
+		v, ok := value.(*tlsfingerprint.HTTP2Config)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHttp2(v)
 		return nil
 	case tlsfingerprintprofile.FieldCipherSuites:
 		v, ok := value.([]uint16)
@@ -43131,6 +43247,9 @@ func (m *TLSFingerprintProfileMutation) ClearedFields() []string {
 	if m.FieldCleared(tlsfingerprintprofile.FieldDescription) {
 		fields = append(fields, tlsfingerprintprofile.FieldDescription)
 	}
+	if m.FieldCleared(tlsfingerprintprofile.FieldHttp2) {
+		fields = append(fields, tlsfingerprintprofile.FieldHttp2)
+	}
 	if m.FieldCleared(tlsfingerprintprofile.FieldCipherSuites) {
 		fields = append(fields, tlsfingerprintprofile.FieldCipherSuites)
 	}
@@ -43174,6 +43293,9 @@ func (m *TLSFingerprintProfileMutation) ClearField(name string) error {
 	switch name {
 	case tlsfingerprintprofile.FieldDescription:
 		m.ClearDescription()
+		return nil
+	case tlsfingerprintprofile.FieldHttp2:
+		m.ClearHttp2()
 		return nil
 	case tlsfingerprintprofile.FieldCipherSuites:
 		m.ClearCipherSuites()
@@ -43224,6 +43346,12 @@ func (m *TLSFingerprintProfileMutation) ResetField(name string) error {
 		return nil
 	case tlsfingerprintprofile.FieldEnableGrease:
 		m.ResetEnableGrease()
+		return nil
+	case tlsfingerprintprofile.FieldShuffleExtensions:
+		m.ResetShuffleExtensions()
+		return nil
+	case tlsfingerprintprofile.FieldHttp2:
+		m.ResetHttp2()
 		return nil
 	case tlsfingerprintprofile.FieldCipherSuites:
 		m.ResetCipherSuites()
@@ -44408,6 +44536,8 @@ type UsageLogMutation struct {
 	addinput_tokens              *int
 	output_tokens                *int
 	addoutput_tokens             *int
+	reasoning_tokens             *int
+	addreasoning_tokens          *int
 	cache_creation_tokens        *int
 	addcache_creation_tokens     *int
 	cache_read_tokens            *int
@@ -45371,6 +45501,62 @@ func (m *UsageLogMutation) AddedOutputTokens() (r int, exists bool) {
 func (m *UsageLogMutation) ResetOutputTokens() {
 	m.output_tokens = nil
 	m.addoutput_tokens = nil
+}
+
+// SetReasoningTokens sets the "reasoning_tokens" field.
+func (m *UsageLogMutation) SetReasoningTokens(i int) {
+	m.reasoning_tokens = &i
+	m.addreasoning_tokens = nil
+}
+
+// ReasoningTokens returns the value of the "reasoning_tokens" field in the mutation.
+func (m *UsageLogMutation) ReasoningTokens() (r int, exists bool) {
+	v := m.reasoning_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReasoningTokens returns the old "reasoning_tokens" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldReasoningTokens(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReasoningTokens is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReasoningTokens requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReasoningTokens: %w", err)
+	}
+	return oldValue.ReasoningTokens, nil
+}
+
+// AddReasoningTokens adds i to the "reasoning_tokens" field.
+func (m *UsageLogMutation) AddReasoningTokens(i int) {
+	if m.addreasoning_tokens != nil {
+		*m.addreasoning_tokens += i
+	} else {
+		m.addreasoning_tokens = &i
+	}
+}
+
+// AddedReasoningTokens returns the value that was added to the "reasoning_tokens" field in this mutation.
+func (m *UsageLogMutation) AddedReasoningTokens() (r int, exists bool) {
+	v := m.addreasoning_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetReasoningTokens resets all changes to the "reasoning_tokens" field.
+func (m *UsageLogMutation) ResetReasoningTokens() {
+	m.reasoning_tokens = nil
+	m.addreasoning_tokens = nil
 }
 
 // SetCacheCreationTokens sets the "cache_creation_tokens" field.
@@ -47142,7 +47328,7 @@ func (m *UsageLogMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UsageLogMutation) Fields() []string {
-	fields := make([]string, 0, 47)
+	fields := make([]string, 0, 48)
 	if m.user != nil {
 		fields = append(fields, usagelog.FieldUserID)
 	}
@@ -47193,6 +47379,9 @@ func (m *UsageLogMutation) Fields() []string {
 	}
 	if m.output_tokens != nil {
 		fields = append(fields, usagelog.FieldOutputTokens)
+	}
+	if m.reasoning_tokens != nil {
+		fields = append(fields, usagelog.FieldReasoningTokens)
 	}
 	if m.cache_creation_tokens != nil {
 		fields = append(fields, usagelog.FieldCacheCreationTokens)
@@ -47326,6 +47515,8 @@ func (m *UsageLogMutation) Field(name string) (ent.Value, bool) {
 		return m.InputTokens()
 	case usagelog.FieldOutputTokens:
 		return m.OutputTokens()
+	case usagelog.FieldReasoningTokens:
+		return m.ReasoningTokens()
 	case usagelog.FieldCacheCreationTokens:
 		return m.CacheCreationTokens()
 	case usagelog.FieldCacheReadTokens:
@@ -47429,6 +47620,8 @@ func (m *UsageLogMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldInputTokens(ctx)
 	case usagelog.FieldOutputTokens:
 		return m.OldOutputTokens(ctx)
+	case usagelog.FieldReasoningTokens:
+		return m.OldReasoningTokens(ctx)
 	case usagelog.FieldCacheCreationTokens:
 		return m.OldCacheCreationTokens(ctx)
 	case usagelog.FieldCacheReadTokens:
@@ -47616,6 +47809,13 @@ func (m *UsageLogMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetOutputTokens(v)
+		return nil
+	case usagelog.FieldReasoningTokens:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReasoningTokens(v)
 		return nil
 	case usagelog.FieldCacheCreationTokens:
 		v, ok := value.(int)
@@ -47844,6 +48044,9 @@ func (m *UsageLogMutation) AddedFields() []string {
 	if m.addoutput_tokens != nil {
 		fields = append(fields, usagelog.FieldOutputTokens)
 	}
+	if m.addreasoning_tokens != nil {
+		fields = append(fields, usagelog.FieldReasoningTokens)
+	}
 	if m.addcache_creation_tokens != nil {
 		fields = append(fields, usagelog.FieldCacheCreationTokens)
 	}
@@ -47912,6 +48115,8 @@ func (m *UsageLogMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedInputTokens()
 	case usagelog.FieldOutputTokens:
 		return m.AddedOutputTokens()
+	case usagelog.FieldReasoningTokens:
+		return m.AddedReasoningTokens()
 	case usagelog.FieldCacheCreationTokens:
 		return m.AddedCacheCreationTokens()
 	case usagelog.FieldCacheReadTokens:
@@ -47977,6 +48182,13 @@ func (m *UsageLogMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddOutputTokens(v)
+		return nil
+	case usagelog.FieldReasoningTokens:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddReasoningTokens(v)
 		return nil
 	case usagelog.FieldCacheCreationTokens:
 		v, ok := value.(int)
@@ -48316,6 +48528,9 @@ func (m *UsageLogMutation) ResetField(name string) error {
 		return nil
 	case usagelog.FieldOutputTokens:
 		m.ResetOutputTokens()
+		return nil
+	case usagelog.FieldReasoningTokens:
+		m.ResetReasoningTokens()
 		return nil
 	case usagelog.FieldCacheCreationTokens:
 		m.ResetCacheCreationTokens()

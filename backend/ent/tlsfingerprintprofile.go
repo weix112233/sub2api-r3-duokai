@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent/tlsfingerprintprofile"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
 
 // TLSFingerprintProfile is the model entity for the TLSFingerprintProfile schema.
@@ -28,6 +29,10 @@ type TLSFingerprintProfile struct {
 	Description *string `json:"description,omitempty"`
 	// EnableGrease holds the value of the "enable_grease" field.
 	EnableGrease bool `json:"enable_grease,omitempty"`
+	// ShuffleExtensions holds the value of the "shuffle_extensions" field.
+	ShuffleExtensions bool `json:"shuffle_extensions,omitempty"`
+	// Http2 holds the value of the "http2" field.
+	Http2 *tlsfingerprint.HTTP2Config `json:"http2,omitempty"`
 	// CipherSuites holds the value of the "cipher_suites" field.
 	CipherSuites []uint16 `json:"cipher_suites,omitempty"`
 	// Curves holds the value of the "curves" field.
@@ -54,9 +59,9 @@ func (*TLSFingerprintProfile) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case tlsfingerprintprofile.FieldCipherSuites, tlsfingerprintprofile.FieldCurves, tlsfingerprintprofile.FieldPointFormats, tlsfingerprintprofile.FieldSignatureAlgorithms, tlsfingerprintprofile.FieldAlpnProtocols, tlsfingerprintprofile.FieldSupportedVersions, tlsfingerprintprofile.FieldKeyShareGroups, tlsfingerprintprofile.FieldPskModes, tlsfingerprintprofile.FieldExtensions:
+		case tlsfingerprintprofile.FieldHttp2, tlsfingerprintprofile.FieldCipherSuites, tlsfingerprintprofile.FieldCurves, tlsfingerprintprofile.FieldPointFormats, tlsfingerprintprofile.FieldSignatureAlgorithms, tlsfingerprintprofile.FieldAlpnProtocols, tlsfingerprintprofile.FieldSupportedVersions, tlsfingerprintprofile.FieldKeyShareGroups, tlsfingerprintprofile.FieldPskModes, tlsfingerprintprofile.FieldExtensions:
 			values[i] = new([]byte)
-		case tlsfingerprintprofile.FieldEnableGrease:
+		case tlsfingerprintprofile.FieldEnableGrease, tlsfingerprintprofile.FieldShuffleExtensions:
 			values[i] = new(sql.NullBool)
 		case tlsfingerprintprofile.FieldID:
 			values[i] = new(sql.NullInt64)
@@ -115,6 +120,20 @@ func (_m *TLSFingerprintProfile) assignValues(columns []string, values []any) er
 				return fmt.Errorf("unexpected type %T for field enable_grease", values[i])
 			} else if value.Valid {
 				_m.EnableGrease = value.Bool
+			}
+		case tlsfingerprintprofile.FieldShuffleExtensions:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field shuffle_extensions", values[i])
+			} else if value.Valid {
+				_m.ShuffleExtensions = value.Bool
+			}
+		case tlsfingerprintprofile.FieldHttp2:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field http2", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Http2); err != nil {
+					return fmt.Errorf("unmarshal field http2: %w", err)
+				}
 			}
 		case tlsfingerprintprofile.FieldCipherSuites:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -240,6 +259,12 @@ func (_m *TLSFingerprintProfile) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("enable_grease=")
 	builder.WriteString(fmt.Sprintf("%v", _m.EnableGrease))
+	builder.WriteString(", ")
+	builder.WriteString("shuffle_extensions=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ShuffleExtensions))
+	builder.WriteString(", ")
+	builder.WriteString("http2=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Http2))
 	builder.WriteString(", ")
 	builder.WriteString("cipher_suites=")
 	builder.WriteString(fmt.Sprintf("%v", _m.CipherSuites))

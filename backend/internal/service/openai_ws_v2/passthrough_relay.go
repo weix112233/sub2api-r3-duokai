@@ -25,6 +25,7 @@ type FrameConn interface {
 }
 
 type Usage struct {
+	ReasoningTokens          int
 	InputTokens              int
 	OutputTokens             int
 	CacheCreationInputTokens int
@@ -1109,6 +1110,7 @@ func parseUsageAndAccumulate(
 	parsedUsage := Usage{
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
+		ReasoningTokens:          max(0, int(reasoningTokens)),
 		CacheCreationInputTokens: openAICacheCreationTokensFromUsage(usageResult),
 		CacheReadInputTokens:     cachedTokens,
 		ImageOutputTokens:        int(imageTokens),
@@ -1140,6 +1142,9 @@ func mergeRelayUsageNonZero(dst *Usage, src Usage) {
 	}
 	if src.OutputTokens > 0 {
 		dst.OutputTokens = src.OutputTokens
+	}
+	if src.ReasoningTokens > 0 {
+		dst.ReasoningTokens = src.ReasoningTokens
 	}
 	if src.CacheCreationInputTokens > 0 {
 		dst.CacheCreationInputTokens = src.CacheCreationInputTokens

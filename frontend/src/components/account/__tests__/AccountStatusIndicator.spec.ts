@@ -51,6 +51,22 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('expires cooldown without waiting for an account refresh', async () => {
+    vi.useFakeTimers()
+    const now = new Date('2026-09-13T00:00:00Z')
+    vi.setSystemTime(now)
+    const wrapper = mount(AccountStatusIndicator, { props: { account: makeAccount({
+      platform: 'openai', rate_limit_reset_at: new Date(now.getTime() + 2000).toISOString()
+    }) } })
+    try {
+      expect(wrapper.find('.badge-warning').exists()).toBe(true)
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(wrapper.find('.badge-warning').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
   it('Claude 5 模型限流时显示 Opus 和 Sonnet 的短别名', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {

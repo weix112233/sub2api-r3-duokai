@@ -1319,6 +1319,12 @@ export default {
 
     // TLS Fingerprint Profiles
     tlsFingerprintProfiles: {
+      platformDefault: 'OpenAI OAuth default TLS profile',
+      unset: 'Not set',
+      inherit: 'Inherit default',
+      noALPN: 'No ALPN',
+      customALPN: 'Custom ALPN',
+      shuffleExtensions: 'Shuffle extensions per connection',
       title: 'TLS Fingerprint Profiles',
       description: 'Manage TLS fingerprint profiles for simulating specific client TLS handshake characteristics',
       createProfile: 'Create Profile',
@@ -1342,7 +1348,7 @@ export default {
         openCollector: 'Open Collector',
         parseYaml: 'Parse YAML',
         yamlParsed: 'YAML parsed successfully, fields auto-filled',
-        yamlParseFailed: 'Failed to parse YAML: name field not found',
+        yamlParseFailed: 'Invalid YAML configuration',
         name: 'Profile Name',
         namePlaceholder: 'e.g. macOS Node.js v24',
         description: 'Description',

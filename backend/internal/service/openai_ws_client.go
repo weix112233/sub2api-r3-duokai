@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
 	coderws "github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -111,8 +112,9 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
 	}
-	if proxy := strings.TrimSpace(proxyURL); proxy != "" {
-		proxyClient, err := d.proxyHTTPClient(proxy)
+	profile, _ := tlsfingerprint.ProfileFromContext(ctx)
+	if proxy := strings.TrimSpace(proxyURL); proxy != "" || profile != nil {
+		proxyClient, err := d.proxyHTTPClient(proxy, profile)
 		if err != nil {
 			return nil, 0, nil, err
 		}
@@ -144,38 +146,56 @@ func (d *coderOpenAIWSClientDialer) Dial(
 	return &coderOpenAIWSClientConn{conn: conn}, 0, respHeaders, nil
 }
 
-func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string) (*http.Client, error) {
+func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string, profiles ...*tlsfingerprint.Profile) (*http.Client, error) {
 	if d == nil {
 		return nil, errors.New("openai ws dialer is nil")
 	}
 	normalizedProxy := strings.TrimSpace(proxy)
-	if normalizedProxy == "" {
+	var profile *tlsfingerprint.Profile
+	if len(profiles) > 0 {
+		profile = profiles[0].ForWebSocket()
+	}
+	if normalizedProxy == "" && profile == nil {
 		return nil, errors.New("proxy url is empty")
 	}
-	parsedProxyURL, err := url.Parse(normalizedProxy)
-	if err != nil {
-		return nil, fmt.Errorf("invalid proxy url: %w", err)
+	var parsedProxyURL *url.URL
+	if normalizedProxy != "" {
+		var err error
+		parsedProxyURL, err = url.Parse(normalizedProxy)
+		if err != nil || parsedProxyURL.Host == "" {
+			return nil, fmt.Errorf("invalid proxy url")
+		}
+	}
+	key := normalizedProxy
+	if profile != nil {
+		key += "|" + profile.TransportKey()
 	}
 	now := time.Now().UnixNano()
 
 	d.proxyMu.Lock()
 	defer d.proxyMu.Unlock()
-	if entry, ok := d.proxyClients[normalizedProxy]; ok && entry != nil && entry.client != nil {
+	if entry, ok := d.proxyClients[key]; ok && entry != nil && entry.client != nil {
 		entry.lastUsedUnixNano = now
 		d.proxyHits.Add(1)
 		return entry.client, nil
 	}
 	d.cleanupProxyClientsLocked(now)
 	transport := &http.Transport{
-		Proxy:               http.ProxyURL(parsedProxyURL),
 		MaxIdleConns:        openAIWSProxyTransportMaxIdleConns,
 		MaxIdleConnsPerHost: openAIWSProxyTransportMaxIdleConnsPerHost,
 		IdleConnTimeout:     openAIWSProxyTransportIdleConnTimeout,
 		TLSHandshakeTimeout: 10 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	client := &http.Client{Transport: transport}
-	d.proxyClients[normalizedProxy] = &openAIWSProxyClientEntry{
+	rt, err := tlsfingerprint.ConfigureTransport(transport, profile, parsedProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Transport: rt}
+	if d.proxyClients == nil {
+		d.proxyClients = make(map[string]*openAIWSProxyClientEntry)
+	}
+	d.proxyClients[key] = &openAIWSProxyClientEntry{
 		client:           client,
 		lastUsedUnixNano: now,
 	}
